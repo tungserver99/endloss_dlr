@@ -182,6 +182,31 @@ def _dequantize_module(indices, lut, device: torch.device, dtype: torch.dtype) -
     return levels[row_ids, group_ids, idx].reshape(rows, -1)
 
 
+def _nan_inf_summary(tensor: torch.Tensor) -> str:
+    finite_mask = torch.isfinite(tensor)
+    nan_count = torch.isnan(tensor).sum().item()
+    inf_count = torch.isinf(tensor).sum().item()
+    finite_count = finite_mask.sum().item()
+    if finite_count > 0:
+        finite_values = tensor[finite_mask]
+        min_value = finite_values.min().item()
+        max_value = finite_values.max().item()
+        return (
+            f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+            f"nan={nan_count} inf={inf_count} finite={finite_count} "
+            f"min={min_value:.6g} max={max_value:.6g}"
+        )
+    return (
+        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+        f"nan={nan_count} inf={inf_count} finite=0"
+    )
+
+
+def _report_nonfinite(name: str, tensor: torch.Tensor):
+    if not torch.isfinite(tensor).all():
+        print(f"[nonfinite] {name}: {_nan_inf_summary(tensor)}")
+
+
 @torch.no_grad()
 def _load_sqllm_quantized_model(
     base_model_path: str,
@@ -219,13 +244,17 @@ def _load_sqllm_quantized_model(
 
         for module_name, indices in layer_weights.items():
             target_module = _resolve_layer_linear_module(analyzer, layer_idx, module_name)
+            lut_tensor = layer_luts[module_name]
+            _report_nonfinite(f"lut layer={layer_idx} module={module_name}", lut_tensor)
             dequantized = _dequantize_module(
                 indices=indices,
-                lut=layer_luts[module_name],
+                lut=lut_tensor,
                 device=target_module.weight.device,
                 dtype=target_module.weight.dtype,
             )
+            _report_nonfinite(f"dequantized layer={layer_idx} module={module_name}", dequantized)
             target_module.weight.data.copy_(dequantized.to(target_module.weight.dtype))
+            _report_nonfinite(f"model_weight layer={layer_idx} module={module_name}", target_module.weight.data)
             del dequantized
 
         del layer_weights, layer_luts
@@ -316,6 +345,16 @@ def evaluate_sliding_window(model, tokenizer, texts, device: str, max_length: in
                 target_chunk[:, :-trg_len] = -100
 
             outputs = model(input_chunk, labels=target_chunk)
+            if not torch.isfinite(outputs.logits).all():
+                print(
+                    f"[nonfinite] logits dataset_window begin={begin_loc} end={end_loc}: "
+                    f"{_nan_inf_summary(outputs.logits)}"
+                )
+            if not torch.isfinite(outputs.loss):
+                print(
+                    f"[nonfinite] loss dataset_window begin={begin_loc} end={end_loc}: "
+                    f"value={outputs.loss.item()}"
+                )
             neg_log_likelihood = outputs.loss * trg_len
             nlls.append(neg_log_likelihood)
             prev_end_loc = end_loc
