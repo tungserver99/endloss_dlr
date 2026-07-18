@@ -25,6 +25,34 @@ def _ensure_batch_factor(U: torch.Tensor) -> tuple[torch.Tensor, bool]:
     return U, False
 
 
+def _dlr_loss_impl(
+    w: torch.Tensor,
+    g: torch.Tensor,
+    d: torch.Tensor,
+    U: torch.Tensor,
+    codebook: torch.Tensor,
+    labels: torch.Tensor,
+    beta: float,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    require_cuda(w, g, d, U, codebook, labels)
+    w_b, squeezed = _ensure_batch_row(w.to(dtype=dtype))
+    g_b, _ = _ensure_batch_row(g.to(dtype=dtype))
+    d_b, _ = _ensure_batch_row(d.to(dtype=dtype))
+    U_b, _ = _ensure_batch_factor(U.to(dtype=dtype))
+    codebook_b, _ = _ensure_batch_row(codebook.to(dtype=dtype))
+    labels_b, _ = _ensure_batch_row(labels.long())
+    q = torch.gather(codebook_b, 1, labels_b)
+    e = q - w_b
+    if U_b.numel() and U_b.shape[-1] > 0:
+        h = torch.einsum("bnr,bn->br", U_b, e)
+        lowrank_term = 0.5 * h.square().sum(dim=1)
+    else:
+        lowrank_term = torch.zeros(w_b.shape[0], device=w_b.device, dtype=dtype)
+    loss = beta * (g_b * e).sum(dim=1) + 0.5 * (d_b * e.square()).sum(dim=1) + lowrank_term
+    return loss[0] if squeezed else loss
+
+
 def dlr_loss(
     w: torch.Tensor,
     g: torch.Tensor,
@@ -34,22 +62,19 @@ def dlr_loss(
     labels: torch.Tensor,
     beta: float,
 ) -> torch.Tensor:
-    require_cuda(w, g, d, U, codebook, labels)
-    w_b, squeezed = _ensure_batch_row(w.float())
-    g_b, _ = _ensure_batch_row(g.float())
-    d_b, _ = _ensure_batch_row(d.float())
-    U_b, _ = _ensure_batch_factor(U.float())
-    codebook_b, _ = _ensure_batch_row(codebook.float())
-    labels_b, _ = _ensure_batch_row(labels.long())
-    q = torch.gather(codebook_b, 1, labels_b)
-    e = q - w_b
-    if U_b.numel() and U_b.shape[-1] > 0:
-        h = torch.einsum("bnr,bn->br", U_b, e)
-        lowrank_term = 0.5 * (h.square().sum(dim=1))
-    else:
-        lowrank_term = torch.zeros(w_b.shape[0], device=w_b.device, dtype=torch.float32)
-    loss = beta * (g_b * e).sum(dim=1) + 0.5 * (d_b * e.square()).sum(dim=1) + lowrank_term
-    return loss[0] if squeezed else loss
+    return _dlr_loss_impl(w, g, d, U, codebook, labels, beta, dtype=torch.float32)
+
+
+def dlr_loss_check(
+    w: torch.Tensor,
+    g: torch.Tensor,
+    d: torch.Tensor,
+    U: torch.Tensor,
+    codebook: torch.Tensor,
+    labels: torch.Tensor,
+    beta: float,
+) -> torch.Tensor:
+    return _dlr_loss_impl(w, g, d, U, codebook, labels, beta, dtype=torch.float64)
 
 
 def spectral_lambda(U: torch.Tensor, safety: float = 1.01) -> torch.Tensor:
@@ -282,40 +307,40 @@ def exact_dlr_codebook_update_batched(
     eps: float,
 ) -> torch.Tensor:
     require_cuda(w, g, d, U, labels, old_codebook)
-    w_b, _ = _ensure_batch_row(w.float())
-    g_b, _ = _ensure_batch_row(g.float())
-    d_b, _ = _ensure_batch_row(d.float())
-    U_b, _ = _ensure_batch_factor(U.float())
+    solve_dtype = torch.float64
+    w_b, _ = _ensure_batch_row(w.to(dtype=solve_dtype))
+    g_b, _ = _ensure_batch_row(g.to(dtype=solve_dtype))
+    d_b, _ = _ensure_batch_row(d.to(dtype=solve_dtype))
+    U_b, _ = _ensure_batch_factor(U.to(dtype=solve_dtype))
     labels_b, _ = _ensure_batch_row(labels.long())
-    codebook_b, _ = _ensure_batch_row(old_codebook.float())
-    B, n = w_b.shape
-    A = torch.zeros((B, K), device=w_b.device, dtype=torch.float32)
-    Bsum = torch.zeros((B, K), device=w_b.device, dtype=torch.float32)
-    Gsum = torch.zeros((B, K), device=w_b.device, dtype=torch.float32)
+    codebook_b, _ = _ensure_batch_row(old_codebook.to(dtype=solve_dtype))
+    B, _ = w_b.shape
+    A = torch.zeros((B, K), device=w_b.device, dtype=solve_dtype)
+    Bsum = torch.zeros((B, K), device=w_b.device, dtype=solve_dtype)
+    Gsum = torch.zeros((B, K), device=w_b.device, dtype=solve_dtype)
     A.scatter_add_(1, labels_b, d_b)
     Bsum.scatter_add_(1, labels_b, d_b * w_b)
     Gsum.scatter_add_(1, labels_b, g_b)
     b = Bsum - beta * Gsum
-    new_codebook = codebook_b.clone()
+    active = A > 0
     if U_b.numel() == 0 or U_b.shape[-1] == 0:
-        active = A > 0
-        new_codebook = torch.where(active, b / A.clamp_min(eps), new_codebook)
-        return new_codebook
+        candidate = b / A.clamp_min(eps)
+        return torch.where(active, candidate, codebook_b).to(dtype=torch.float32)
+
     r = U_b.shape[-1]
-    M = torch.zeros((B, K, r), device=w_b.device, dtype=torch.float32)
+    M = torch.zeros((B, K, r), device=w_b.device, dtype=solve_dtype)
     expanded_labels = labels_b.unsqueeze(-1).expand(-1, -1, r)
     M.scatter_add_(1, expanded_labels, U_b)
     z = torch.einsum("bnr,bn->br", U_b, w_b)
-    active = A > 0
-    inv_A = torch.where(active, A.reciprocal(), torch.zeros_like(A))
-    weighted_M = M * inv_A.unsqueeze(-1)
-    Q = torch.einsum("bkr,bks->brs", M, weighted_M)
-    v = torch.einsum("bkr,bk->br", M, b * inv_A) - z
-    eye = torch.eye(r, device=w_b.device, dtype=torch.float32).unsqueeze(0).expand(B, -1, -1)
-    h = torch.linalg.solve(eye + Q, v.unsqueeze(-1)).squeeze(-1)
-    candidate = (b - torch.einsum("bkr,br->bk", M, h)) * inv_A
-    new_codebook = torch.where(active, candidate, new_codebook)
-    return new_codebook
+
+    Hc = torch.diag_embed(A) + torch.einsum("bkr,blr->bkl", M, M)
+    inactive = ~active
+    Hc = Hc + torch.diag_embed(inactive.to(dtype=solve_dtype))
+    rhs = b + torch.einsum("bkr,br->bk", M, z)
+    rhs = torch.where(active, rhs, codebook_b)
+
+    candidate = torch.linalg.solve(Hc, rhs.unsqueeze(-1)).squeeze(-1)
+    return candidate.to(dtype=torch.float32)
 
 
 def sort_codebook_and_remap_labels(codebook: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -387,8 +412,8 @@ def quantize_group_dlr_batched(
     codebook = exact_dlr_codebook_update_batched(w_b, g_b, d_b, U_b, labels, codebook, beta, K, eps)
     codebook, labels = sort_codebook_and_remap_labels(codebook, labels)
 
-    old_loss = dlr_loss(w_b, g_b, d_b, U_b, codebook, labels, beta)
-    history = [old_loss]
+    old_loss = dlr_loss_check(w_b, g_b, d_b, U_b, codebook, labels, beta)
+    history = [old_loss.to(dtype=torch.float32)]
     active_mask = torch.ones(w_b.shape[0], device=w_b.device, dtype=torch.bool)
 
     for iteration in range(max_outer_iters):
@@ -400,12 +425,12 @@ def quantize_group_dlr_batched(
         updated_codebook = exact_dlr_codebook_update_batched(w_b, g_b, d_b, U_b, labels, codebook, beta, K, eps)
         codebook = torch.where(active_mask.unsqueeze(1), updated_codebook, codebook)
         codebook, labels = sort_codebook_and_remap_labels(codebook, labels)
-        new_loss = dlr_loss(w_b, g_b, d_b, U_b, codebook, labels, beta)
+        new_loss = dlr_loss_check(w_b, g_b, d_b, U_b, codebook, labels, beta)
         loss_scale = old_loss.abs().clamp_min(1.0)
 
         increased = new_loss > old_loss + 1e-6 * loss_scale
         if torch.any(increased):
-            assignment_loss = dlr_loss(
+            assignment_loss = dlr_loss_check(
                 w_b, g_b, d_b, U_b, previous_codebook, assignment_labels, beta
             )
             assignment_increased = assignment_loss > old_loss + 1e-6 * loss_scale
@@ -421,7 +446,7 @@ def quantize_group_dlr_batched(
                 f"codebook violations={int(codebook_increased.sum().item())}"
             )
 
-        history.append(new_loss)
+        history.append(new_loss.to(dtype=torch.float32))
         labels_unchanged = (labels == prev_labels).all(dim=1)
         relative_drop = (old_loss - new_loss).abs() / loss_scale
         done = labels_unchanged | (relative_drop <= rel_tol)
@@ -432,4 +457,7 @@ def quantize_group_dlr_batched(
 
     loss_history = torch.stack(history, dim=1)
     return codebook, labels, loss_history
+
+
+
 

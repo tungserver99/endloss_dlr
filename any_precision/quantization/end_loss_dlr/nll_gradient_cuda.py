@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import sys
 
 import torch
 from tqdm.auto import tqdm
@@ -56,6 +57,18 @@ def _iter_layer_chunks(layers, chunk_size: int):
         yield start, layers[start:start + chunk_size]
 
 
+def _progress_kwargs() -> dict:
+    return {
+        "ascii": True,
+        "leave": False,
+        "dynamic_ncols": False,
+        "ncols": 100,
+        "mininterval": 5.0,
+        "maxinterval": 30.0,
+        "file": sys.stdout,
+    }
+
+
 def collect_nll_gradients(analyzer, tokens: torch.Tensor, batch_size: int, device: str, layer_chunk_size: int = 8) -> dict[int, dict[str, torch.Tensor]]:
     model = analyzer.model
     model.to(device)
@@ -86,11 +99,7 @@ def collect_nll_gradients(analyzer, tokens: torch.Tensor, batch_size: int, devic
         for start in tqdm(
             range(0, tokens.shape[0], batch_size),
             desc=f"Collecting NLL gradients L{chunk_start}-{chunk_start + len(layer_chunk) - 1}",
-            dynamic_ncols=True,
-            mininterval=5.0,
-            maxinterval=30.0,
-            ascii=True,
-            leave=True,
+            **_progress_kwargs(),
         ):
             batch = tokens[start:start + batch_size].to(model.device)
             outputs = model(input_ids=batch, labels=batch, use_cache=False)
@@ -120,5 +129,6 @@ def collect_nll_gradients(analyzer, tokens: torch.Tensor, batch_size: int, devic
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return grads
+
 
 

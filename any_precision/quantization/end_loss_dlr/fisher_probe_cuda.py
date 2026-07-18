@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import sys
 
 import torch
 import torch.nn.functional as F
@@ -90,11 +91,13 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
         for start in tqdm(
             range(0, max_samples, config.calibration_batch_size),
             desc=f"Collecting Fisher sketch L{chunk_start}-{chunk_start + len(layer_chunk) - 1}",
-            dynamic_ncols=True,
+            ascii=True,
+            leave=False,
+            dynamic_ncols=False,
+            ncols=100,
             mininterval=5.0,
             maxinterval=30.0,
-            ascii=True,
-            leave=True,
+            file=sys.stdout,
         ):
             batch = tokens[start:start + config.calibration_batch_size].to(config.device)
             logits = model(input_ids=batch, use_cache=False).logits[:, :-1, :].float()
@@ -161,11 +164,13 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
         for start in tqdm(
             range(0, max_samples, config.calibration_batch_size),
             desc=f"Refining Fisher subspace L{chunk_start}-{chunk_start + len(layer_chunk) - 1}",
-            dynamic_ncols=True,
+            ascii=True,
+            leave=False,
+            dynamic_ncols=False,
+            ncols=100,
             mininterval=5.0,
             maxinterval=30.0,
-            ascii=True,
-            leave=True,
+            file=sys.stdout,
         ):
             batch = tokens[start:start + config.calibration_batch_size].to(config.device)
             logits = model(input_ids=batch, use_cache=False).logits[:, :-1, :].float()
@@ -256,6 +261,7 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return fisher_stats
+
 
 
 

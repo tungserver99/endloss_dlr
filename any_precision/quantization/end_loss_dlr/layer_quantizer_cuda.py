@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -162,19 +163,19 @@ def quantize_model(model, stats: EndLossDLRModelStats, config: EndLossDLRConfig,
         layers,
         desc="Quantizing layers",
         unit="layer",
-        dynamic_ncols=True,
+        ascii=True,
+        leave=False,
+        dynamic_ncols=False,
+        ncols=100,
         mininterval=5.0,
         maxinterval=30.0,
-        ascii=True,
-        leave=True,
+        file=sys.stdout,
     )):
         layer_start = time.perf_counter()
-        logging.info("Starting layer %d/%d", layer_idx + 1, len(layers))
         layer_codebooks = {}
         layer_labels = {}
         modules = analyzer.get_modules(layer)
         for module_name, module in modules.items():
-            logging.info("Layer %d module %s: start", layer_idx, module_name)
             module_stats = stats.modules[layer_idx][module_name]
             weight = module.weight.data.to(config.device).float()
             row_codebooks = []
@@ -210,9 +211,7 @@ def quantize_model(model, stats: EndLossDLRModelStats, config: EndLossDLRConfig,
             module.weight.data.copy_(weight.to(module.weight.dtype))
             layer_codebooks[module_name] = torch.stack([item[1] for item in row_codebooks], dim=0).unsqueeze(1)
             layer_labels[module_name] = torch.stack([item[1] for item in row_labels], dim=0).unsqueeze(1)
-            logging.info("Layer %d module %s: complete", layer_idx, module_name)
         metadata["timings"][f"layer_{layer_idx}"] = time.perf_counter() - layer_start
-        logging.info("Completed layer %d/%d in %.2fs", layer_idx + 1, len(layers), metadata["timings"][f"layer_{layer_idx}"])
         saved_layers.append((layer_idx, layer_codebooks, layer_labels))
 
     metadata["timings"]["total_quantize"] = time.perf_counter() - total_start
@@ -313,3 +312,5 @@ def hybrid_end_loss_quantize(
     except Exception as exc:
         logging.warning(f"Packing failed; quantized cache is still available at {output_dir}: {exc}")
     return output_dir, metadata
+
+
