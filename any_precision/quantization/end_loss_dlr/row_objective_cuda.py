@@ -402,6 +402,12 @@ def quantize_group_dlr_batched(
     g_b, _ = _ensure_batch_row(g.float())
     d_b, _ = _ensure_batch_row(d.float())
     U_b, _ = _ensure_batch_factor(U.float())
+    if not torch.isfinite(w_b).all():
+        raise ValueError("Non-finite weights passed into quantize_group_dlr_batched")
+    if beta == 0.0:
+        g_b = torch.zeros_like(w_b)
+    elif not torch.isfinite(g_b).all():
+        raise ValueError("Non-finite NLL gradients passed into quantize_group_dlr_batched")
     d_b = d_b.clamp_min(eps)
 
 
@@ -457,6 +463,7 @@ def quantize_group_dlr_batched(
 
     loss_history = torch.stack(history, dim=1)
     return codebook, labels, loss_history
+
 
 
 

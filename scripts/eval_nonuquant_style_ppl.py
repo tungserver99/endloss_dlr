@@ -384,7 +384,7 @@ def parse_args():
     parser.add_argument("--tokenizer-path", default="", help="Optional tokenizer source; defaults to --model-path")
     parser.add_argument("--datasets", nargs="+", default=["wikitext2", "c4"])
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--dtype", default="float16")
+    parser.add_argument("--dtype", default="float32")
     parser.add_argument("--precision", type=int, default=None, help="Ignored; kept for compatibility with older scripts")
     parser.add_argument("--stride", type=int, default=512)
     parser.add_argument("--max-length", type=int, default=2048)
@@ -505,3 +505,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
