@@ -15,6 +15,8 @@ REDPAJAMA_SOURCE="${REDPAJAMA_SOURCE:-cache}"
 REDPAJAMA_DATASET_REPO="${REDPAJAMA_DATASET_REPO:-togethercomputer/RedPajama-Data-1T}"
 RESULTS_DIR="${RESULTS_DIR:-./results/ppl}"
 PPL_DATASETS="${PPL_DATASETS:-wikitext2,c4}"
+PIPELINE_MODE="${PIPELINE_MODE:-quantize}"
+RUN_POST_QUANT_PPL="${RUN_POST_QUANT_PPL:-1}"
 
 BETA="${BETA:-0.5}"
 RANK="${RANK:-4}"
@@ -40,6 +42,9 @@ fi
 if [[ "${OVERWRITE_QUANTIZE:-0}" == "1" ]]; then
   EXTRA_ARGS+=("--overwrite_quantize")
 fi
+if [[ "${OVERWRITE_PACK:-0}" == "1" ]]; then
+  EXTRA_ARGS+=("--overwrite_pack")
+fi
 if [[ -n "${RANDOM_STATE:-}" ]]; then
   EXTRA_ARGS+=("--random_state" "${RANDOM_STATE}")
 fi
@@ -57,25 +62,42 @@ MODEL_BASENAME="${MODEL##*/}"
 OUTPUT_FILE="${RESULTS_DIR}/anyprec-${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.json"
 mkdir -p "${RESULTS_DIR}"
 
-python quantize.py "${MODEL}" \
-  --seed_precision "${BITS}" \
-  --parent_precision "${BITS}" \
-  --mode quantize \
-  --cache_dir "${CACHE_DIR}" \
-  --dataset "${DATASET}" \
-  --seq_len "${SEQ_LEN}" \
-  --num_examples "${NUM_EXAMPLES}" \
-  --redpajama_source "${REDPAJAMA_SOURCE}" \
-  --redpajama_dataset_repo "${REDPAJAMA_DATASET_REPO}" \
-  --beta "${BETA}" \
-  --rank "${RANK}" \
-  --num_output_groups "${NUM_OUTPUT_GROUPS}" \
-  --calibration_batch_size "${CALIBRATION_BATCH_SIZE}" \
-  --fisher_probes "${FISHER_PROBES}" \
-  --max_outer_iters "${MAX_OUTER_ITERS}" \
-  --rel_tol "${REL_TOL}" \
-  --lambda_safety "${LAMBDA_SAFETY}" \
-  --tie_tol "${TIE_TOL}" \
-  --eval_ppl_datasets "${PPL_DATASETS}" \
-  --eval_ppl_output_file "${OUTPUT_FILE}" \
-  "${EXTRA_ARGS[@]}"
+case "${PIPELINE_MODE}" in
+  tokens|gradients|quantize|pack)
+    ;;
+  *)
+    echo "Unsupported PIPELINE_MODE='${PIPELINE_MODE}'. Use one of: tokens, gradients, quantize, pack." >&2
+    exit 1
+    ;;
+esac
+
+echo "[endloss_dlr] PIPELINE_MODE=${PIPELINE_MODE} RUN_POST_QUANT_PPL=${RUN_POST_QUANT_PPL}"
+
+CMD=(
+  python quantize.py "${MODEL}"
+  --seed_precision "${BITS}"
+  --parent_precision "${BITS}"
+  --mode "${PIPELINE_MODE}"
+  --cache_dir "${CACHE_DIR}"
+  --dataset "${DATASET}"
+  --seq_len "${SEQ_LEN}"
+  --num_examples "${NUM_EXAMPLES}"
+  --redpajama_source "${REDPAJAMA_SOURCE}"
+  --redpajama_dataset_repo "${REDPAJAMA_DATASET_REPO}"
+  --beta "${BETA}"
+  --rank "${RANK}"
+  --num_output_groups "${NUM_OUTPUT_GROUPS}"
+  --calibration_batch_size "${CALIBRATION_BATCH_SIZE}"
+  --fisher_probes "${FISHER_PROBES}"
+  --max_outer_iters "${MAX_OUTER_ITERS}"
+  --rel_tol "${REL_TOL}"
+  --lambda_safety "${LAMBDA_SAFETY}"
+  --tie_tol "${TIE_TOL}"
+)
+
+if [[ "${RUN_POST_QUANT_PPL}" == "1" && ( "${PIPELINE_MODE}" == "quantize" || "${PIPELINE_MODE}" == "pack" ) ]]; then
+  CMD+=(--eval_ppl_datasets "${PPL_DATASETS}" --eval_ppl_output_file "${OUTPUT_FILE}")
+fi
+
+CMD+=("${EXTRA_ARGS[@]}")
+"${CMD[@]}"
