@@ -131,7 +131,7 @@ def any_precision_quantize(
         num_groups=None,
         sub_saliency=None,
         skip_save_gradients=False,
-        beta=0.5,
+        beta=0.0,
         rank=4,
         num_output_groups=8,
         calibration_batch_size=1,

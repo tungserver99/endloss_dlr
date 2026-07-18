@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random_state", type=int)
     parser.add_argument("--calibration_batch_size", type=int, default=1)
     parser.add_argument("--fisher_probes", type=int, default=16)
-    parser.add_argument("--beta", type=float, default=0.5)
+    parser.add_argument("--beta", type=float, default=0.0)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--num_output_groups", type=int, default=8)
     parser.add_argument("--row_batch_size", type=int, default=128)

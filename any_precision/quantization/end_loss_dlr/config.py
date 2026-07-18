@@ -8,7 +8,7 @@ import torch
 @dataclass
 class EndLossDLRConfig:
     bits: int = 3
-    beta: float = 0.5
+    beta: float = 0.0
     rank: int = 4
     oversample: int = 4
     subspace_iterations: int = 1

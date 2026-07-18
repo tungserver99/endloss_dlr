@@ -235,7 +235,7 @@ def hybrid_end_loss_quantize(
     random_state: int | None = None,
     calibration_batch_size: int = 1,
     fisher_probes: int = 16,
-    beta: float = 0.5,
+    beta: float = 0.0,
     rank: int = 4,
     num_output_groups: int = 8,
     row_batch_size: int = 128,
