@@ -24,7 +24,7 @@ if __name__ == "__main__":
     parser.add_argument("--cpu_count", type=int, help="The number of CPUs to use for parallelization")
     parser.add_argument("--overwrite_tokens", action="store_true",
                         help="Whether to overwrite the tokens stored to disk")
-    parser.add_argument('--overwrite_gradients', action="store_true",
+    parser.add_argument("--overwrite_gradients", action="store_true",
                         help="Whether to overwrite the gradients stored to disk")
     parser.add_argument("--overwrite_quantize", action="store_true",
                         help="Whether to overwrite the parent model stored to disk")
@@ -56,8 +56,8 @@ if __name__ == "__main__":
     parser.add_argument("--tie_tol", type=float, help="Tolerance for current-label tie breaking in MM assignment")
     parser.add_argument("--eval_ppl_datasets", type=str, help="Comma-separated datasets for direct post-quantization PPL eval")
     parser.add_argument("--eval_ppl_output_file", type=str, help="Optional JSON file for direct post-quantization PPL results")
+    parser.add_argument("--identity_curvature", action="store_true", help="Diagnostic mode: force D=1 and U=0 during quantization")
 
     args = parser.parse_args()
     args.sub_saliency = tuple(args.sub_saliency) if args.sub_saliency else None
     any_precision_quantize(**{k: v for k, v in args.__dict__.items() if v is not None})
-

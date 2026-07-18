@@ -144,6 +144,7 @@ def any_precision_quantize(
         tie_tol=0.0,
         eval_ppl_datasets=None,
         eval_ppl_output_file=None,
+        identity_curvature=False,
 ):
     del dns, num_groups, sub_saliency, skip_save_gradients
 
@@ -270,6 +271,7 @@ def any_precision_quantize(
         dataset=dataset,
         seq_len=seq_len,
         num_examples=num_examples,
+        identity_curvature=identity_curvature,
     )
 
     if os.path.exists(gradients_cache_path):
@@ -286,6 +288,12 @@ def any_precision_quantize(
         )
         torch.save(model_stats, gradients_cache_path)
     logging.info("End-loss statistics complete.")
+    if dlr_config.identity_curvature:
+        logging.info("Identity-curvature diagnostic enabled: forcing D=1 and U=0 for all modules before quantization")
+        for layer_stats in model_stats.modules.values():
+            for module_stats in layer_stats.values():
+                module_stats.group_d = torch.ones_like(module_stats.group_d)
+                module_stats.group_U = torch.zeros_like(module_stats.group_U)
 
     if mode == 'gradients':
         logging.info("Keeping temporary NLL cache for future resume: %s", nll_gradients_cache_path)

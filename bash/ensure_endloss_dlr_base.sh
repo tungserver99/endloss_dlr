@@ -35,6 +35,7 @@ REL_TOL="${REL_TOL:-1e-7}"
 LAMBDA_SAFETY="${LAMBDA_SAFETY:-1.01}"
 TIE_TOL="${TIE_TOL:-0.0}"
 CPU_COUNT="${CPU_COUNT:-}"
+IDENTITY_CURVATURE="${IDENTITY_CURVATURE:-0}"
 
 EXTRA_ARGS=()
 
@@ -62,6 +63,9 @@ fi
 if [[ -n "${CPU_COUNT}" ]]; then
   EXTRA_ARGS+=("--cpu_count" "${CPU_COUNT}")
 fi
+if [[ "${IDENTITY_CURVATURE}" == "1" ]]; then
+  EXTRA_ARGS+=("--identity_curvature")
+fi
 
 MODEL_BASENAME="${MODEL##*/}"
 OUTPUT_FILE="${RESULTS_DIR}/anyprec-${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.json"
@@ -78,7 +82,7 @@ case "${PIPELINE_MODE}" in
     ;;
 esac
 
-echo "[endloss_dlr] PIPELINE_MODE=${PIPELINE_MODE} RUN_POST_QUANT_PPL=${RUN_POST_QUANT_PPL}"
+echo "[endloss_dlr] PIPELINE_MODE=${PIPELINE_MODE} RUN_POST_QUANT_PPL=${RUN_POST_QUANT_PPL} IDENTITY_CURVATURE=${IDENTITY_CURVATURE}"
 
 CMD=(
   python quantize.py "${MODEL}"

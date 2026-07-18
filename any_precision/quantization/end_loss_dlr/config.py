@@ -31,6 +31,7 @@ class EndLossDLRConfig:
     dataset: str = "redpajama"
     seq_len: int = 4096
     num_examples: int = 128
+    identity_curvature: bool = False
 
     @property
     def num_levels(self) -> int:
