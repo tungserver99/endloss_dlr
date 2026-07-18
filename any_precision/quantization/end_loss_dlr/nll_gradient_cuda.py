@@ -22,6 +22,35 @@ def _disable_checkpointing_for_stats(model):
         model.config.use_cache = True
 
 
+def _snapshot_float_dtypes(model):
+    param_dtypes = {}
+    buffer_dtypes = {}
+    for name, param in model.named_parameters():
+        if torch.is_floating_point(param):
+            param_dtypes[name] = param.dtype
+    for name, buffer in model.named_buffers():
+        if torch.is_floating_point(buffer):
+            buffer_dtypes[name] = buffer.dtype
+    return param_dtypes, buffer_dtypes
+
+
+def _restore_float_dtypes(model, param_dtypes, buffer_dtypes):
+    for name, param in model.named_parameters():
+        target_dtype = param_dtypes.get(name)
+        if target_dtype is not None and param.dtype != target_dtype:
+            param.data = param.data.to(dtype=target_dtype)
+            if param.grad is not None and torch.is_floating_point(param.grad):
+                param.grad.data = param.grad.data.to(dtype=target_dtype)
+    for name, buffer in model.named_buffers():
+        target_dtype = buffer_dtypes.get(name)
+        if target_dtype is not None and buffer.dtype != target_dtype:
+            module = model
+            parts = name.split('.')
+            for part in parts[:-1]:
+                module = getattr(module, part)
+            module._buffers[parts[-1]] = buffer.to(dtype=target_dtype)
+
+
 def _iter_layer_chunks(layers, chunk_size: int):
     for start in range(0, len(layers), chunk_size):
         yield start, layers[start:start + chunk_size]
@@ -31,6 +60,7 @@ def collect_nll_gradients(analyzer, tokens: torch.Tensor, batch_size: int, devic
     model = analyzer.model
     model.to(device)
     model.eval()
+    original_param_dtypes, original_buffer_dtypes = _snapshot_float_dtypes(model)
     model = model.bfloat16()
     _enable_checkpointing_for_stats(model)
 
@@ -84,8 +114,11 @@ def collect_nll_gradients(analyzer, tokens: torch.Tensor, batch_size: int, devic
     for param in model.parameters():
         param.requires_grad_(original_requires_grad[id(param)])
 
+    _restore_float_dtypes(model, original_param_dtypes, original_buffer_dtypes)
     _disable_checkpointing_for_stats(model)
     model.eval()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return grads
+
+

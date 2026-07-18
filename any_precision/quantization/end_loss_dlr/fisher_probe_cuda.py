@@ -6,7 +6,13 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from .nll_gradient_cuda import _disable_checkpointing_for_stats, _enable_checkpointing_for_stats, _iter_layer_chunks
+from .nll_gradient_cuda import (
+    _disable_checkpointing_for_stats,
+    _enable_checkpointing_for_stats,
+    _iter_layer_chunks,
+    _restore_float_dtypes,
+    _snapshot_float_dtypes,
+)
 
 
 def _row_groups(out_features: int, requested_groups: int, device: str) -> list[torch.Tensor]:
@@ -44,6 +50,7 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
     model = analyzer.model
     model.to(config.device)
     model.eval()
+    original_param_dtypes, original_buffer_dtypes = _snapshot_float_dtypes(model)
     model = model.bfloat16()
     _enable_checkpointing_for_stats(model)
 
@@ -245,8 +252,11 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
     for param in model.parameters():
         param.requires_grad_(original_requires_grad[id(param)])
 
+    _restore_float_dtypes(model, original_param_dtypes, original_buffer_dtypes)
     _disable_checkpointing_for_stats(model)
     model.eval()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return fisher_stats
+
+

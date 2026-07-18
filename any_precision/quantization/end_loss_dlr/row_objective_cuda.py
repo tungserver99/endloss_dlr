@@ -306,18 +306,15 @@ def exact_dlr_codebook_update_batched(
     expanded_labels = labels_b.unsqueeze(-1).expand(-1, -1, r)
     M.scatter_add_(1, expanded_labels, U_b)
     z = torch.einsum("bnr,bn->br", U_b, w_b)
-    eye = torch.eye(r, device=w_b.device, dtype=torch.float32)
-    for bidx in range(B):
-        active = A[bidx] > 0
-        if not torch.any(active):
-            continue
-        A_a = A[bidx, active]
-        b_a = b[bidx, active]
-        M_a = M[bidx, active]
-        Q = torch.einsum("kr,ks,k->rs", M_a, M_a, A_a.reciprocal())
-        v = (M_a * (b_a / A_a).unsqueeze(1)).sum(dim=0) - z[bidx]
-        h = torch.linalg.solve(eye + Q, v.unsqueeze(1)).squeeze(1)
-        new_codebook[bidx, active] = (b_a - M_a.matmul(h)) / A_a
+    active = A > 0
+    inv_A = torch.where(active, A.reciprocal(), torch.zeros_like(A))
+    weighted_M = M * inv_A.unsqueeze(-1)
+    Q = torch.einsum("bkr,bks->brs", M, weighted_M)
+    v = torch.einsum("bkr,bk->br", M, b * inv_A) - z
+    eye = torch.eye(r, device=w_b.device, dtype=torch.float32).unsqueeze(0).expand(B, -1, -1)
+    h = torch.linalg.solve(eye + Q, v.unsqueeze(-1)).squeeze(-1)
+    candidate = (b - torch.einsum("bkr,br->bk", M, h)) * inv_A
+    new_codebook = torch.where(active, candidate, new_codebook)
     return new_codebook
 
 
@@ -435,3 +432,4 @@ def quantize_group_dlr_batched(
 
     loss_history = torch.stack(history, dim=1)
     return codebook, labels, loss_history
+
