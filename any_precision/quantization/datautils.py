@@ -44,7 +44,7 @@ def _get_wikitext2(split):
     assert split in ['train', 'validation', 'test'], f"Unknown split {split} for wikitext2"
 
     _, load_dataset = _require_hf_datasets()
-    data = load_dataset('wikitext', 'wikitext-2-raw-v1', split=split, trust_remote_code=True)
+    data = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split=split, trust_remote_code=True)
     return data['text']
 
 
