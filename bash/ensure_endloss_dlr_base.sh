@@ -17,6 +17,11 @@ RESULTS_DIR="${RESULTS_DIR:-./results/ppl}"
 PPL_DATASETS="${PPL_DATASETS:-wikitext2,c4}"
 PIPELINE_MODE="${PIPELINE_MODE:-quantize}"
 RUN_POST_QUANT_PPL="${RUN_POST_QUANT_PPL:-1}"
+EVAL_STRIDE="${EVAL_STRIDE:-512}"
+EVAL_MAX_LENGTH="${EVAL_MAX_LENGTH:-2048}"
+EVAL_C4_SAMPLES="${EVAL_C4_SAMPLES:-2000}"
+EVAL_DTYPE="${EVAL_DTYPE:-float16}"
+HF_TOKEN="${HF_TOKEN:-}"
 
 BETA="${BETA:-0.5}"
 RANK="${RANK:-4}"
@@ -60,6 +65,8 @@ fi
 
 MODEL_BASENAME="${MODEL##*/}"
 OUTPUT_FILE="${RESULTS_DIR}/anyprec-${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.json"
+QUANTIZED_PATH="${CACHE_DIR}/endloss_dlr_quantized/${MODEL_BASENAME}-w${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
+PACKED_PATH="${CACHE_DIR}/packed/anyprec-${MODEL_BASENAME}-endloss-dlr-w${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
 mkdir -p "${RESULTS_DIR}"
 
 case "${PIPELINE_MODE}" in
@@ -94,10 +101,29 @@ CMD=(
   --lambda_safety "${LAMBDA_SAFETY}"
   --tie_tol "${TIE_TOL}"
 )
-
-if [[ "${RUN_POST_QUANT_PPL}" == "1" && ( "${PIPELINE_MODE}" == "quantize" || "${PIPELINE_MODE}" == "pack" ) ]]; then
-  CMD+=(--eval_ppl_datasets "${PPL_DATASETS}" --eval_ppl_output_file "${OUTPUT_FILE}")
-fi
-
 CMD+=("${EXTRA_ARGS[@]}")
 "${CMD[@]}"
+
+if [[ "${RUN_POST_QUANT_PPL}" == "1" && ( "${PIPELINE_MODE}" == "quantize" || "${PIPELINE_MODE}" == "pack" ) ]]; then
+  DATASET_ARGS=()
+  IFS=',' read -r -a DATASET_LIST <<< "${PPL_DATASETS}"
+  for dataset_name in "${DATASET_LIST[@]}"; do
+    trimmed="$(echo "${dataset_name}" | xargs)"
+    if [[ -n "${trimmed}" ]]; then
+      DATASET_ARGS+=("${trimmed}")
+    fi
+  done
+
+  python scripts/eval_nonuquant_style_ppl.py \
+    --model-path "${MODEL}" \
+    --quantized-path "${QUANTIZED_PATH}" \
+    --model-name "$(basename "${PACKED_PATH}")" \
+    --tokenizer-path "${MODEL}" \
+    --datasets "${DATASET_ARGS[@]}" \
+    --dtype "${EVAL_DTYPE}" \
+    --stride "${EVAL_STRIDE}" \
+    --max-length "${EVAL_MAX_LENGTH}" \
+    --c4-samples "${EVAL_C4_SAMPLES}" \
+    --hf-token "${HF_TOKEN}" \
+    --output-file "${OUTPUT_FILE}"
+fi

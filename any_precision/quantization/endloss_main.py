@@ -18,7 +18,7 @@ from .config import (
     DEFAULT_SEED_PRECISION,
 )
 from .datautils import get_tokens
-from .full_datautils import evaluate_perplexity, get_loaders
+from ..evaluate import eval as fast_eval
 from .end_loss_dlr.config import EndLossDLRConfig
 from .end_loss_dlr.layer_quantizer_cuda import collect_end_loss_statistics, quantize_model
 from .end_loss_dlr.serialization import save_layer_artifacts, save_metadata
@@ -74,38 +74,28 @@ def _normalize_tokens(tokens):
 
 
 def _evaluate_quantized_ppl(
-    model,
-    model_path: str,
-    seq_len: int,
+    quantized_model_path: str,
     datasets: str,
-    random_state,
     output_file: str | None,
 ):
     dataset_names = [item.strip() for item in datasets.split(",") if item.strip()]
     if not dataset_names:
         return None
 
-    device = next(model.parameters()).device
-    param_dtype = next(model.parameters()).dtype
-    amp_dtype = param_dtype if param_dtype in (torch.float16, torch.bfloat16) else None
-
-    results = {}
-    for dataset_name in dataset_names:
-        logging.info("Evaluating perplexity on %s", dataset_name)
-        eval_dataset = get_loaders(
-            dataset_name,
-            seed=0 if random_state is None else random_state,
-            model_path=model_path,
-            seqlen=seq_len,
-            eval_mode=True,
-        )
-        ppl = evaluate_perplexity(model, eval_dataset, seq_len, device=device, amp_dtype=amp_dtype)
-        logging.info("%s perplexity: %.9f", dataset_name, ppl)
-        results[dataset_name] = ppl
+    logging.info("Running fast nonuquant-style PPL eval on %s", quantized_model_path)
+    tokenizer_type, tokenizer, loaded_model = fast_eval.auto_model_load(quantized_model_path, verbose=True)
+    results = fast_eval.evaluate_ppl(
+        loaded_model,
+        tokenizer,
+        dataset_names,
+        verbose=True,
+        chunk_size=2048,
+        tokenizer_type=tokenizer_type,
+    )
 
     payload = {
-        "model_path": model_path,
-        "chunk_size": seq_len,
+        "model_path": quantized_model_path,
+        "chunk_size": 2048,
         "datasets": dataset_names,
         "ppl": results,
     }
@@ -115,6 +105,11 @@ def _evaluate_quantized_ppl(
         with output_path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
         logging.info("Saved PPL results to %s", output_path)
+
+    del loaded_model
+    del tokenizer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return payload
 
 def any_precision_quantize(
@@ -329,11 +324,8 @@ def any_precision_quantize(
     logging.info("Quantization complete.")
     if eval_ppl_datasets:
         _evaluate_quantized_ppl(
-            model=analyzer.model,
-            model_path=model_string,
-            seq_len=seq_len,
+            quantized_model_path=quantized_cache_path,
             datasets=eval_ppl_datasets,
-            random_state=random_state,
             output_file=eval_ppl_output_file,
         )
 
