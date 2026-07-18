@@ -72,6 +72,41 @@ def _normalize_tokens(tokens):
     raise TypeError(f"Unsupported token cache type: {type(tokens).__name__}")
 
 
+def _dequantize_saved_module(indices: torch.Tensor, lut: torch.Tensor) -> torch.Tensor:
+    idx = indices.long()
+    rows, groups, width = idx.shape
+    row_ids = torch.arange(rows, device=idx.device).view(-1, 1, 1)
+    group_ids = torch.arange(groups, device=idx.device).view(1, -1, 1)
+    return lut[row_ids, group_ids, idx].reshape(rows, groups * width)
+
+
+def _validate_saved_layers_against_model(saved_layers, analyzer, atol: float = 1e-6):
+    max_abs_diff = 0.0
+    checked_modules = 0
+    for layer_idx, layer_codebooks, layer_labels in saved_layers:
+        layer = analyzer.get_layers()[layer_idx]
+        modules = analyzer.get_modules(layer)
+        for module_name, module in modules.items():
+            reconstructed = _dequantize_saved_module(
+                layer_labels[module_name].to(module.weight.device),
+                layer_codebooks[module_name].to(module.weight.device, dtype=module.weight.dtype),
+            )
+            target = module.weight.data
+            diff = (reconstructed - target).abs().max().item()
+            max_abs_diff = max(max_abs_diff, diff)
+            checked_modules += 1
+            if diff > atol:
+                raise RuntimeError(
+                    f"Saved quantized artifacts do not reconstruct in-memory weights for "
+                    f"layer={layer_idx}, module={module_name}; max_abs_diff={diff:.6g}"
+                )
+    logging.info(
+        "Saved-artifact consistency check passed for %d modules (max_abs_diff=%.6g)",
+        checked_modules,
+        max_abs_diff,
+    )
+
+
 
 def _evaluate_quantized_ppl(
     quantized_model_path: str,
@@ -329,6 +364,7 @@ def any_precision_quantize(
     for layer_idx, layer_codebooks, layer_labels in saved_layers:
         save_layer_artifacts(quantized_cache_path, layer_idx, layer_codebooks, layer_labels)
     save_metadata(quantized_cache_path, metadata)
+    _validate_saved_layers_against_model(saved_layers, analyzer)
 
     logging.info("Quantization complete.")
     if eval_ppl_datasets:
@@ -368,6 +404,8 @@ def any_precision_quantize(
     if os.path.exists(nll_gradients_cache_path):
         os.remove(nll_gradients_cache_path)
         logging.info("Removed temporary NLL cache after successful pipeline: %s", nll_gradients_cache_path)
+
+
 
 
 
