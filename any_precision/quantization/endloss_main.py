@@ -99,10 +99,8 @@ def any_precision_quantize(
         rel_tol=1e-7,
         lambda_safety=1.01,
         tie_tol=0.0,
-        greedy_candidate_chunk=256,
-        use_triton_rbvt=False,
 ):
-    del cpu_count, dns, num_groups, sub_saliency, skip_save_gradients, greedy_candidate_chunk, use_triton_rbvt
+    del cpu_count, dns, num_groups, sub_saliency, skip_save_gradients
 
     _setup_logging()
 
@@ -309,3 +307,4 @@ def any_precision_quantize(
     if os.path.exists(nll_gradients_cache_path):
         os.remove(nll_gradients_cache_path)
         logging.info("Removed temporary NLL cache after successful pipeline: %s", nll_gradients_cache_path)
+

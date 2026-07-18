@@ -7,7 +7,7 @@ from any_precision.quantization.end_loss_dlr import hybrid_end_loss_quantize
 
 if __name__ == "__main__":
     load_project_dotenv(Path(__file__).resolve().parent)
-    parser = argparse.ArgumentParser(description="Hybrid End-Loss DLR quantization")
+    parser = argparse.ArgumentParser(description="End-Loss DLR scalar quantization")
     parser.add_argument("model", type=str, help="The model to quantize")
     parser.add_argument("--bits", type=int, default=3, help="Target bit-width")
     parser.add_argument("--yaml_path", type=str, help="Architecture config yaml file")
@@ -25,8 +25,10 @@ if __name__ == "__main__":
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--num_output_groups", type=int, default=8)
     parser.add_argument("--row_batch_size", type=int, default=128)
-    parser.add_argument("--greedy_candidate_chunk", type=int, default=256)
-    parser.add_argument("--no_triton_rbvt", action="store_true")
+    parser.add_argument("--max_outer_iters", type=int, default=8)
+    parser.add_argument("--rel_tol", type=float, default=1e-7)
+    parser.add_argument("--lambda_safety", type=float, default=1.01)
+    parser.add_argument("--tie_tol", type=float, default=0.0)
     args = parser.parse_args()
 
     hybrid_end_loss_quantize(
@@ -47,6 +49,8 @@ if __name__ == "__main__":
         rank=args.rank,
         num_output_groups=args.num_output_groups,
         row_batch_size=args.row_batch_size,
-        greedy_candidate_chunk=args.greedy_candidate_chunk,
-        use_triton_rbvt=not args.no_triton_rbvt,
+        max_outer_iters=args.max_outer_iters,
+        rel_tol=args.rel_tol,
+        lambda_safety=args.lambda_safety,
+        tie_tol=args.tie_tol,
     )

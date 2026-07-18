@@ -29,19 +29,17 @@ def _make_group_omega(in_features: int, rank: int, oversample: int, device: str,
 
 
 def _fit_group_dlr_from_streaming_sketch(diag_total: torch.Tensor, Y: torch.Tensor, rank: int, damping_ratio: float, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    del damping_ratio, eps
     diag_total = diag_total.float()
     if rank <= 0:
-        damping = damping_ratio * diag_total.mean().clamp_min(eps)
-        return diag_total + damping, diag_total.new_zeros((diag_total.numel(), 0))
+        return diag_total, diag_total.new_zeros((diag_total.numel(), 0))
 
     if not torch.any(Y.abs() > 0):
-        damping = damping_ratio * diag_total.mean().clamp_min(eps)
-        return diag_total + damping, diag_total.new_zeros((diag_total.numel(), 0))
+        return diag_total, diag_total.new_zeros((diag_total.numel(), 0))
 
     Q, _ = torch.linalg.qr(Y, mode="reduced")
     if Q.numel() == 0 or Q.shape[1] == 0:
-        damping = damping_ratio * diag_total.mean().clamp_min(eps)
-        return diag_total + damping, diag_total.new_zeros((diag_total.numel(), 0))
+        return diag_total, diag_total.new_zeros((diag_total.numel(), 0))
 
     return diag_total, Q
 
@@ -258,5 +256,6 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return fisher_stats
+
 
 

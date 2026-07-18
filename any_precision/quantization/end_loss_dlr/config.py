@@ -31,8 +31,6 @@ class EndLossDLRConfig:
     dataset: str = "redpajama"
     seq_len: int = 4096
     num_examples: int = 128
-    greedy_candidate_chunk: int = 256
-    use_triton_rbvt: bool = False
 
     @property
     def num_levels(self) -> int:
@@ -59,3 +57,4 @@ class EndLossDLRConfig:
             raise ValueError(f"gradient_num_examples must be >= 1, got {self.gradient_num_examples}")
         if self.stats_layer_chunk_size < 1:
             raise ValueError(f"stats_layer_chunk_size must be >= 1, got {self.stats_layer_chunk_size}")
+
