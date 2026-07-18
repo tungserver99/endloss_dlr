@@ -22,7 +22,7 @@ def save_layer_artifacts(output_dir: str, layer_idx: int, module_codebooks: dict
     weight_dir = Path(output_dir) / "weights"
     lut_dir.mkdir(parents=True, exist_ok=True)
     weight_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({name: tensor.half().cpu() for name, tensor in module_codebooks.items()}, lut_dir / f"l{layer_idx}.pt")
+    torch.save({name: tensor.float().cpu() for name, tensor in module_codebooks.items()}, lut_dir / f"l{layer_idx}.pt")
     torch.save({name: tensor.to(torch.uint8).cpu() for name, tensor in module_labels.items()}, weight_dir / f"l{layer_idx}.pt")
 
 
