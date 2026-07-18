@@ -65,7 +65,7 @@ fi
 
 MODEL_BASENAME="${MODEL##*/}"
 OUTPUT_FILE="${RESULTS_DIR}/anyprec-${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.json"
-QUANTIZED_PATH="${CACHE_DIR}/endloss_dlr_quantized/${MODEL_BASENAME}-w${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
+QUANTIZED_PATH="${CACHE_DIR}/quantized/${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
 PACKED_PATH="${CACHE_DIR}/packed/anyprec-${MODEL_BASENAME}-endloss-dlr-w${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
 mkdir -p "${RESULTS_DIR}"
 
