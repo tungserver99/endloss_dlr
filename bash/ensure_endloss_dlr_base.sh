@@ -114,16 +114,21 @@ if [[ "${RUN_POST_QUANT_PPL}" == "1" && ( "${PIPELINE_MODE}" == "quantize" || "$
     fi
   done
 
-  python scripts/eval_nonuquant_style_ppl.py \
-    --model-path "${MODEL}" \
-    --quantized-path "${QUANTIZED_PATH}" \
-    --model-name "$(basename "${PACKED_PATH}")" \
-    --tokenizer-path "${MODEL}" \
-    --datasets "${DATASET_ARGS[@]}" \
-    --dtype "${EVAL_DTYPE}" \
-    --stride "${EVAL_STRIDE}" \
-    --max-length "${EVAL_MAX_LENGTH}" \
-    --c4-samples "${EVAL_C4_SAMPLES}" \
-    --hf-token "${HF_TOKEN}" \
+  EVAL_CMD=(
+    python scripts/eval_nonuquant_style_ppl.py
+    --model-path "${MODEL}"
+    --quantized-path "${QUANTIZED_PATH}"
+    --model-name "$(basename "${PACKED_PATH}")"
+    --tokenizer-path "${MODEL}"
+    --datasets "${DATASET_ARGS[@]}"
+    --dtype "${EVAL_DTYPE}"
+    --stride "${EVAL_STRIDE}"
+    --max-length "${EVAL_MAX_LENGTH}"
+    --c4-samples "${EVAL_C4_SAMPLES}"
     --output-file "${OUTPUT_FILE}"
+  )
+  if [[ -n "${HF_TOKEN}" ]]; then
+    EVAL_CMD+=(--hf-token "${HF_TOKEN}")
+  fi
+  "${EVAL_CMD[@]}"
 fi
