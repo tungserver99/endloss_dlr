@@ -209,10 +209,13 @@ def quantize_model(model, stats: EndLossDLRModelStats, config: EndLossDLRConfig,
             row_codebooks.sort(key=lambda x: x[0])
             row_labels.sort(key=lambda x: x[0])
             module.weight.data.copy_(weight.to(module.weight.dtype))
-            layer_codebooks[module_name] = torch.stack([item[1] for item in row_codebooks], dim=0).unsqueeze(1)
-            layer_labels[module_name] = torch.stack([item[1] for item in row_labels], dim=0).unsqueeze(1)
+            layer_codebooks[module_name] = torch.stack([item[1] for item in row_codebooks], dim=0).unsqueeze(1).cpu()
+            layer_labels[module_name] = torch.stack([item[1] for item in row_labels], dim=0).unsqueeze(1).cpu()
+            del row_codebooks, row_labels, weight
         metadata["timings"][f"layer_{layer_idx}"] = time.perf_counter() - layer_start
         saved_layers.append((layer_idx, layer_codebooks, layer_labels))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     metadata["timings"]["total_quantize"] = time.perf_counter() - total_start
     return saved_layers, metadata
@@ -306,11 +309,12 @@ def hybrid_end_loss_quantize(
             output_model_path=packed_dir,
             seed_precision=bits,
             parent_precision=bits,
-            cpu_count=1,
+            cpu_count=cpu_count,
             dns=False,
         )
     except Exception as exc:
         logging.warning(f"Packing failed; quantized cache is still available at {output_dir}: {exc}")
     return output_dir, metadata
+
 
 

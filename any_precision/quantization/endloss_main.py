@@ -1,8 +1,10 @@
 import datetime
+import json
 import logging
 import os
 import shutil
 import sys
+from pathlib import Path
 
 import torch
 
@@ -16,6 +18,7 @@ from .config import (
     DEFAULT_SEED_PRECISION,
 )
 from .datautils import get_tokens
+from .full_datautils import evaluate_perplexity, get_loaders
 from .end_loss_dlr.config import EndLossDLRConfig
 from .end_loss_dlr.layer_quantizer_cuda import collect_end_loss_statistics, quantize_model
 from .end_loss_dlr.serialization import save_layer_artifacts, save_metadata
@@ -69,6 +72,51 @@ def _normalize_tokens(tokens):
     raise TypeError(f"Unsupported token cache type: {type(tokens).__name__}")
 
 
+
+def _evaluate_quantized_ppl(
+    model,
+    model_path: str,
+    seq_len: int,
+    datasets: str,
+    random_state,
+    output_file: str | None,
+):
+    dataset_names = [item.strip() for item in datasets.split(",") if item.strip()]
+    if not dataset_names:
+        return None
+
+    device = next(model.parameters()).device
+    param_dtype = next(model.parameters()).dtype
+    amp_dtype = param_dtype if param_dtype in (torch.float16, torch.bfloat16) else None
+
+    results = {}
+    for dataset_name in dataset_names:
+        logging.info("Evaluating perplexity on %s", dataset_name)
+        eval_dataset = get_loaders(
+            dataset_name,
+            seed=0 if random_state is None else random_state,
+            model_path=model_path,
+            seqlen=seq_len,
+            eval_mode=True,
+        )
+        ppl = evaluate_perplexity(model, eval_dataset, seq_len, device=device, amp_dtype=amp_dtype)
+        logging.info("%s perplexity: %.9f", dataset_name, ppl)
+        results[dataset_name] = ppl
+
+    payload = {
+        "model_path": model_path,
+        "chunk_size": seq_len,
+        "datasets": dataset_names,
+        "ppl": results,
+    }
+    if output_file:
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        logging.info("Saved PPL results to %s", output_path)
+    return payload
+
 def any_precision_quantize(
         model,
         seed_precision=DEFAULT_SEED_PRECISION,
@@ -99,8 +147,10 @@ def any_precision_quantize(
         rel_tol=1e-7,
         lambda_safety=1.01,
         tie_tol=0.0,
+        eval_ppl_datasets=None,
+        eval_ppl_output_file=None,
 ):
-    del cpu_count, dns, num_groups, sub_saliency, skip_save_gradients
+    del dns, num_groups, sub_saliency, skip_save_gradients
 
     _setup_logging()
 
@@ -276,6 +326,17 @@ def any_precision_quantize(
         save_layer_artifacts(quantized_cache_path, layer_idx, layer_codebooks, layer_labels)
     save_metadata(quantized_cache_path, metadata)
 
+    logging.info("Quantization complete.")
+    if eval_ppl_datasets:
+        _evaluate_quantized_ppl(
+            model=analyzer.model,
+            model_path=model_string,
+            seq_len=seq_len,
+            datasets=eval_ppl_datasets,
+            random_state=random_state,
+            output_file=eval_ppl_output_file,
+        )
+
     if mode == 'quantize':
         if os.path.exists(nll_gradients_cache_path):
             os.remove(nll_gradients_cache_path)
@@ -283,7 +344,6 @@ def any_precision_quantize(
         return
 
     analyzer.drop_original_weights()
-    logging.info("Quantization complete.")
 
     logging.info("------------------- Pack -------------------")
     if os.path.exists(model_output_path) and os.path.isdir(model_output_path) and os.listdir(model_output_path):
@@ -300,11 +360,15 @@ def any_precision_quantize(
         output_model_path=model_output_path,
         seed_precision=parent_precision,
         parent_precision=parent_precision,
-        cpu_count=1,
+        cpu_count=cpu_count,
         dns=False,
     )
     logging.info("Packing complete.")
     if os.path.exists(nll_gradients_cache_path):
         os.remove(nll_gradients_cache_path)
         logging.info("Removed temporary NLL cache after successful pipeline: %s", nll_gradients_cache_path)
+
+
+
+
 

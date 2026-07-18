@@ -54,7 +54,10 @@ if __name__ == "__main__":
     parser.add_argument("--rel_tol", type=float, help="Relative loss-drop tolerance for stopping")
     parser.add_argument("--lambda_safety", type=float, help="Safety multiplier for the MM spectral majorizer")
     parser.add_argument("--tie_tol", type=float, help="Tolerance for current-label tie breaking in MM assignment")
+    parser.add_argument("--eval_ppl_datasets", type=str, help="Comma-separated datasets for direct post-quantization PPL eval")
+    parser.add_argument("--eval_ppl_output_file", type=str, help="Optional JSON file for direct post-quantization PPL results")
 
     args = parser.parse_args()
     args.sub_saliency = tuple(args.sub_saliency) if args.sub_saliency else None
     any_precision_quantize(**{k: v for k, v in args.__dict__.items() if v is not None})
+

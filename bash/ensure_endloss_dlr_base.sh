@@ -13,6 +13,8 @@ SEQ_LEN="${SEQ_LEN:-4096}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-1024}"
 REDPAJAMA_SOURCE="${REDPAJAMA_SOURCE:-cache}"
 REDPAJAMA_DATASET_REPO="${REDPAJAMA_DATASET_REPO:-togethercomputer/RedPajama-Data-1T}"
+RESULTS_DIR="${RESULTS_DIR:-./results/ppl}"
+PPL_DATASETS="${PPL_DATASETS:-wikitext2,c4}"
 
 BETA="${BETA:-0.5}"
 RANK="${RANK:-4}"
@@ -25,6 +27,7 @@ MAX_OUTER_ITERS="${MAX_OUTER_ITERS:-8}"
 REL_TOL="${REL_TOL:-1e-7}"
 LAMBDA_SAFETY="${LAMBDA_SAFETY:-1.01}"
 TIE_TOL="${TIE_TOL:-0.0}"
+CPU_COUNT="${CPU_COUNT:-}"
 
 EXTRA_ARGS=()
 
@@ -37,9 +40,6 @@ fi
 if [[ "${OVERWRITE_QUANTIZE:-0}" == "1" ]]; then
   EXTRA_ARGS+=("--overwrite_quantize")
 fi
-if [[ "${OVERWRITE_PACK:-0}" == "1" ]]; then
-  EXTRA_ARGS+=("--overwrite_pack")
-fi
 if [[ -n "${RANDOM_STATE:-}" ]]; then
   EXTRA_ARGS+=("--random_state" "${RANDOM_STATE}")
 fi
@@ -49,11 +49,18 @@ fi
 if [[ -n "${STATS_LAYER_CHUNK_SIZE}" ]]; then
   EXTRA_ARGS+=("--stats_layer_chunk_size" "${STATS_LAYER_CHUNK_SIZE}")
 fi
+if [[ -n "${CPU_COUNT}" ]]; then
+  EXTRA_ARGS+=("--cpu_count" "${CPU_COUNT}")
+fi
+
+MODEL_BASENAME="${MODEL##*/}"
+OUTPUT_FILE="${RESULTS_DIR}/anyprec-${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.json"
+mkdir -p "${RESULTS_DIR}"
 
 python quantize.py "${MODEL}" \
   --seed_precision "${BITS}" \
   --parent_precision "${BITS}" \
-  --mode pack \
+  --mode quantize \
   --cache_dir "${CACHE_DIR}" \
   --dataset "${DATASET}" \
   --seq_len "${SEQ_LEN}" \
@@ -69,4 +76,6 @@ python quantize.py "${MODEL}" \
   --rel_tol "${REL_TOL}" \
   --lambda_safety "${LAMBDA_SAFETY}" \
   --tie_tol "${TIE_TOL}" \
+  --eval_ppl_datasets "${PPL_DATASETS}" \
+  --eval_ppl_output_file "${OUTPUT_FILE}" \
   "${EXTRA_ARGS[@]}"
