@@ -20,6 +20,7 @@ import os
 import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,8 @@ except ModuleNotFoundError:
 from any_precision.analyzer import dispatch_model, get_analyzer
 from any_precision.quantization.endloss_dlr import DLRConfig
 from any_precision.quantization.endloss_dlr_batched import quantize_rows_dlr_batched
+from any_precision.quantization.endloss_dlr_fast_nll import collect_nll_gradients
+from any_precision.quantization.endloss_dlr_fast_fisher import collect_fisher_curvature
 from any_precision.quantization.pack import pack
 
 
@@ -410,6 +413,84 @@ def collect_endloss_dlr_stats(
     _restore_model(model, original_requires_grad)
 
 
+
+def _row_group_ranges(out_features: int, requested_groups: int) -> list[tuple[int, int]]:
+    groups = min(max(1, int(requested_groups)), int(out_features))
+    chunk = (out_features + groups - 1) // groups
+    return [(start, min(start + chunk, out_features)) for start in range(0, out_features, chunk)]
+
+def collect_endloss_dlr_stats_fast(
+    analyzer,
+    tokens: torch.Tensor,
+    output_folder: str,
+    rank: int,
+    oversampling: int,
+    n_calib: int,
+    batch_size: int,
+    device: str,
+    fisher_probes: int,
+    gradient_num_examples: int | None,
+    stats_layer_chunk_size: int,
+    num_output_groups: int,
+    damping_ratio: float,
+    overwrite: bool,
+) -> None:
+    output_path = Path(output_folder)
+    output_path.mkdir(parents=True, exist_ok=True)
+    expected = [output_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
+    if not overwrite and expected and all(path.exists() for path in expected):
+        logging.info("Cached fast EndLoss_DLR stats found in %s", output_folder)
+        return
+    if overwrite:
+        for path in expected:
+            if path.exists():
+                path.unlink()
+
+    calib_tokens = tokens[: min(n_calib, tokens.shape[0])]
+    grad_count = min(calib_tokens.shape[0], gradient_num_examples or calib_tokens.shape[0])
+    grad_tokens = calib_tokens[:grad_count]
+
+    logging.info(
+        "Collecting fast EndLoss_DLR stats | grad_examples=%d fisher_probes=%d layer_chunk=%d output_groups=%d",
+        grad_tokens.shape[0],
+        min(fisher_probes, calib_tokens.shape[0]),
+        stats_layer_chunk_size,
+        num_output_groups,
+    )
+    nll_gradients = collect_nll_gradients(
+        analyzer=analyzer,
+        tokens=grad_tokens,
+        batch_size=batch_size,
+        device=device,
+        layer_chunk_size=stats_layer_chunk_size,
+    )
+    fisher_config = SimpleNamespace(
+        device=device,
+        fisher_probes=fisher_probes,
+        rank=rank,
+        oversample=oversampling,
+        num_output_groups=num_output_groups,
+        damping_ratio=damping_ratio,
+        eps=1e-12,
+        calibration_batch_size=batch_size,
+        stats_layer_chunk_size=stats_layer_chunk_size,
+    )
+    fisher_curvature = collect_fisher_curvature(analyzer, calib_tokens, fisher_config)
+
+    for layer_idx in range(analyzer.num_layers):
+        layer_dict = {}
+        for module_name, grad in nll_gradients[layer_idx].items():
+            curvature = fisher_curvature[layer_idx][module_name]
+            layer_dict[module_name] = {
+                "g": grad.cpu(),
+                "group_d": curvature["group_d"].cpu(),
+                "group_U": curvature["group_U"].cpu(),
+                "num_output_groups": int(curvature["group_d"].shape[0]),
+                "gradient_examples": int(grad_tokens.shape[0]),
+                "fisher_probes": int(min(fisher_probes, calib_tokens.shape[0])),
+            }
+        torch.save(layer_dict, output_path / f"l{layer_idx}.pt")
+
 def quantize_module_from_scratch(
     W_fp: torch.Tensor,
     module_stats: dict,
@@ -422,11 +503,6 @@ def quantize_module_from_scratch(
     device = W_fp.device
     W_fp = W_fp.float()
     g = module_stats["g"].to(device).float()
-    d_A = module_stats["d_A"].to(device).float()
-    U_A = module_stats["U_A"].to(device).float()
-    alpha = module_stats["alpha"].to(device).float()
-    alpha_min = float(module_stats["alpha_min"])
-    alpha = alpha.clamp_min(alpha_min)
 
     out_features, in_features = W_fp.shape
     K = 2 ** bits
@@ -435,48 +511,70 @@ def quantize_module_from_scratch(
     stats = EndLossDLRQuantStats(rows_total=out_features)
     row_batch_size = max(1, int(row_batch_size))
 
-    for start in range(0, out_features, row_batch_size):
-        end = min(start + row_batch_size, out_features)
-        try:
-            result = quantize_rows_dlr_batched(
-                w=W_fp[start:end],
-                g=g[start:end],
-                d_A=d_A,
-                U_A=U_A,
-                alpha=alpha[start:end],
-                K=K,
-                config=config,
-            )
-        except RuntimeError as exc:
-            retry_config = replace(config, lambda_safety=max(config.lambda_safety * 1.05, 1.05))
-            location = f"layer={layer_idx}, module={module_name}, rows=[{start},{end})"
-            logging.warning(
-                "EndLoss_DLR batched solve failed at %s with lambda_safety=%s; retrying with lambda_safety=%s. Error: %s",
-                location,
-                config.lambda_safety,
-                retry_config.lambda_safety,
-                exc,
-            )
+    if "group_d" in module_stats:
+        group_d = module_stats["group_d"].to(device).float()
+        group_U = module_stats["group_U"].to(device).float()
+        row_ranges = _row_group_ranges(out_features, int(module_stats.get("num_output_groups", group_d.shape[0])))
+        group_iter = [(group_idx, start, end) for group_idx, (start, end) in enumerate(row_ranges)]
+    else:
+        d_A = module_stats["d_A"].to(device).float()
+        U_A = module_stats["U_A"].to(device).float()
+        alpha = module_stats["alpha"].to(device).float()
+        alpha_min = float(module_stats["alpha_min"])
+        alpha = alpha.clamp_min(alpha_min)
+        group_iter = [(None, 0, out_features)]
+
+    for group_idx, group_start, group_end in group_iter:
+        for start in range(group_start, group_end, row_batch_size):
+            end = min(start + row_batch_size, group_end)
+            if group_idx is None:
+                d_cur = d_A
+                U_cur = U_A
+                alpha_cur = alpha[start:end]
+            else:
+                d_cur = group_d[group_idx]
+                U_cur = group_U[group_idx]
+                alpha_cur = torch.ones(end - start, device=device, dtype=torch.float32)
             try:
                 result = quantize_rows_dlr_batched(
                     w=W_fp[start:end],
                     g=g[start:end],
-                    d_A=d_A,
-                    U_A=U_A,
-                    alpha=alpha[start:end],
+                    d_A=d_cur,
+                    U_A=U_cur,
+                    alpha=alpha_cur,
                     K=K,
-                    config=retry_config,
+                    config=config,
                 )
-            except RuntimeError as retry_exc:
-                raise RuntimeError(
-                    f"EndLoss_DLR failed after retry at {location}; refusing to fall back to another quantizer."
-                ) from retry_exc
+            except RuntimeError as exc:
+                retry_config = replace(config, lambda_safety=max(config.lambda_safety * 1.05, 1.05))
+                location = f"layer={layer_idx}, module={module_name}, group={group_idx}, rows=[{start},{end})"
+                logging.warning(
+                    "EndLoss_DLR batched solve failed at %s with lambda_safety=%s; retrying with lambda_safety=%s. Error: %s",
+                    location,
+                    config.lambda_safety,
+                    retry_config.lambda_safety,
+                    exc,
+                )
+                try:
+                    result = quantize_rows_dlr_batched(
+                        w=W_fp[start:end],
+                        g=g[start:end],
+                        d_A=d_cur,
+                        U_A=U_cur,
+                        alpha=alpha_cur,
+                        K=K,
+                        config=retry_config,
+                    )
+                except RuntimeError as retry_exc:
+                    raise RuntimeError(
+                        f"EndLoss_DLR failed after retry at {location}; refusing to fall back to another quantizer."
+                    ) from retry_exc
 
-        labels_out[start:end, 0] = result.labels.detach().cpu().to(torch.uint8)
-        lut_out[start:end, 0] = result.codebooks.detach().cpu().to(torch.float16)
-        stats.rows_quantized += end - start
-        stats.rows_fallback += result.fallback_rows
-        stats.objective_sum += float(result.losses.sum().item())
+            labels_out[start:end, 0] = result.labels.detach().cpu().to(torch.uint8)
+            lut_out[start:end, 0] = result.codebooks.detach().cpu().to(torch.float16)
+            stats.rows_quantized += end - start
+            stats.rows_fallback += result.fallback_rows
+            stats.objective_sum += float(result.losses.sum().item())
 
     return labels_out, lut_out, stats
 
@@ -556,6 +654,11 @@ def parse_args():
     parser.add_argument("--n-calib", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--stats-chunk-size", type=int, default=1024)
+    parser.add_argument("--fisher-probes", type=int, default=16)
+    parser.add_argument("--gradient-num-examples", type=int, default=None)
+    parser.add_argument("--stats-layer-chunk-size", type=int, default=8)
+    parser.add_argument("--num-output-groups", type=int, default=8)
+    parser.add_argument("--damping-ratio", type=float, default=1e-4)
     parser.add_argument("--row-batch-size", type=int, default=64)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--oversampling", type=int, default=4)
@@ -585,7 +688,9 @@ def main():
     data_tag = f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
     stats_tag = (
         f"{data_tag}_r{args.rank}_os{args.oversampling}_ncalib{args.n_calib}"
-        f"_chunk{args.stats_chunk_size}_dmin{_tag_value(args.stats_d_min_scale)}_seed{args.random_state}"
+        f"_fprobe{args.fisher_probes}_gex{args.gradient_num_examples or args.n_calib}"
+        f"_lchunk{args.stats_layer_chunk_size}_og{args.num_output_groups}"
+        f"_damp{_tag_value(args.damping_ratio)}_seed{args.random_state}"
     )
     solver_tag = (
         f"{stats_tag}_beta{_tag_value(args.beta)}_iters{args.max_outer_iters}"
@@ -646,7 +751,7 @@ def main():
     if args.stage == "tokens":
         return
 
-    collect_endloss_dlr_stats(
+    collect_endloss_dlr_stats_fast(
         analyzer=analyzer,
         tokens=tokens,
         output_folder=args.stats_path,
@@ -654,9 +759,12 @@ def main():
         oversampling=args.oversampling,
         n_calib=args.n_calib,
         batch_size=args.batch_size,
-        stats_chunk_size=args.stats_chunk_size,
-        d_min_scale=args.stats_d_min_scale,
-        random_state=args.random_state,
+        device=args.device,
+        fisher_probes=args.fisher_probes,
+        gradient_num_examples=args.gradient_num_examples,
+        stats_layer_chunk_size=args.stats_layer_chunk_size,
+        num_output_groups=args.num_output_groups,
+        damping_ratio=args.damping_ratio,
         overwrite=args.overwrite_stats,
     )
     if args.stage == "stats":

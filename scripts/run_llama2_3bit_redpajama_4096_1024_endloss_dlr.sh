@@ -15,6 +15,10 @@ python endloss_dlr_quantize.py "meta-llama/Llama-2-7b-hf" \
   --n-calib 1024 \
   --batch-size 1 \
   --stats-chunk-size 1024 \
+  --fisher-probes 16 \
+  --stats-layer-chunk-size 8 \
+  --num-output-groups 8 \
+  --damping-ratio 1e-4 \
   --row-batch-size 64 \
   --rank 4 \
   --oversampling 4 \
