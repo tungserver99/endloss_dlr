@@ -75,12 +75,26 @@ def main() -> None:
             bad_indices += int(idx_bad)
 
             flat_pos = int(abs_lut.reshape(-1).argmax().item()) if lut.numel() else 0
-            row = flat_pos // k
-            codeword = flat_pos % k
+            lut_rows = int(lut.shape[0])
+            lut_groups = int(lut.shape[1]) if lut.ndim >= 3 else 1
+            k = int(lut.shape[-1])
+            row = flat_pos // (lut_groups * k)
+            rem = flat_pos % (lut_groups * k)
+            out_group = rem // k
+            codeword = rem % k
             lut_value = float(lut.reshape(-1)[flat_pos].item()) if lut.numel() else float("nan")
-            row_indices = idx_t[row].reshape(-1).long() if idx_t.numel() else torch.empty(0, dtype=torch.long)
+            if idx_t.numel() and idx_t.ndim == 3:
+                row_indices = idx_t[row, min(out_group, idx_t.shape[1] - 1)].reshape(-1).long()
+            elif idx_t.numel():
+                row_indices = idx_t[row].reshape(-1).long()
+            else:
+                row_indices = torch.empty(0, dtype=torch.long)
             usage_count = int((row_indices == int(codeword)).sum().item())
-            materialized_row = lut[row].index_select(0, row_indices.clamp(0, k - 1)) if row_indices.numel() else torch.empty(0)
+            if row_indices.numel():
+                lut_row_group = lut[row, min(out_group, lut.shape[1] - 1)].reshape(-1)
+                materialized_row = lut_row_group.index_select(0, row_indices.clamp(0, k - 1))
+            else:
+                materialized_row = torch.empty(0)
             max_abs_materialized_row = float(materialized_row.abs().max().item()) if materialized_row.numel() else float("nan")
             row_col = int(materialized_row.abs().argmax().item()) if materialized_row.numel() else -1
             materialized_value = float(materialized_row[row_col].item()) if row_col >= 0 else float("nan")
@@ -117,7 +131,7 @@ def main() -> None:
                         materialized_argmax = (layer_idx, module_name, mat_row, mat_group, mat_col, float(materialized.reshape(-1)[local_flat].item()))
             if (not finite.all()) or max_abs > args.warn_abs or idx_bad:
                 worst.append((
-                    max_abs, layer_idx, module_name, row, codeword, lut_value, usage_count,
+                    max_abs, layer_idx, module_name, row, out_group, codeword, lut_value, usage_count,
                     max_abs_materialized_row, row_col, materialized_value,
                     max_abs_original_row, max_abs_original_module, int((~finite).sum().item()), idx_min, idx_max, k,
                 ))
@@ -139,15 +153,15 @@ def main() -> None:
         return
 
     print(f"Suspicious LUT outliers (top {args.topk}, warn_abs={args.warn_abs:g}):")
-    print("layer\tmodule\trow\tcodeword\tlut_value\tusage_count\tmax_abs_lut\tmax_abs_materialized_row\tmaterialized_argmax_col\tmaterialized_value\tmax_abs_original_row\tmax_abs_original_module\tnonfinite\tidx_range\tK")
+    print("layer\tmodule\trow\tlut_group\tcodeword\tlut_value\tusage_count\tmax_abs_lut\tmax_abs_materialized_row\tmaterialized_argmax_col\tmaterialized_value\tmax_abs_original_row\tmax_abs_original_module\tnonfinite\tidx_range\tK")
     for item in worst[: args.topk]:
         (
-            max_abs, layer_idx, module_name, row, codeword, lut_value, usage_count,
+            max_abs, layer_idx, module_name, row, out_group, codeword, lut_value, usage_count,
             max_abs_materialized_row, row_col, materialized_value,
             max_abs_original_row, max_abs_original_module, nonfinite, idx_min, idx_max, k,
         ) = item
         print(
-            f"{layer_idx:02d}\t{module_name}\t{row}\t{codeword}\t{lut_value:.6e}\t{usage_count}\t{max_abs:.6e}\t"
+            f"{layer_idx:02d}\t{module_name}\t{row}\t{out_group}\t{codeword}\t{lut_value:.6e}\t{usage_count}\t{max_abs:.6e}\t"
             f"{max_abs_materialized_row:.6e}\t{row_col}\t{materialized_value:.6e}\t"
             f"{max_abs_original_row:.6e}\t{max_abs_original_module:.6e}\t{nonfinite}\t[{idx_min},{idx_max}]\t{k}"
         )
