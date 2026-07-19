@@ -13,7 +13,8 @@ python endloss_dlr_quantize.py "meta-llama/Llama-2-7b-hf" \
   --seq-len 4096 \
   --num-examples 1024 \
   --n-calib 1024 \
-  --batch-size 4 \
+  --batch-size 1 \
+  --stats-chunk-size 1024 \
   --row-batch-size 64 \
   --rank 4 \
   --oversampling 4 \

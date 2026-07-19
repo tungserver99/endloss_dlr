@@ -126,6 +126,14 @@ def _prediction_slice(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+
+def _iter_activation_chunks(tensor: torch.Tensor, chunk_size: int):
+    flat = tensor.reshape(-1, tensor.shape[-1])
+    if flat.numel() == 0:
+        return
+    chunk_size = max(1, int(chunk_size))
+    for start in range(0, flat.shape[0], chunk_size):
+        yield flat[start : start + chunk_size].float()
 def _prepare_model(analyzer):
     model = analyzer.model
     if torch.cuda.device_count() > 1:
@@ -184,19 +192,18 @@ def _init_stat_buffers(modules_by_layer, rank: int, oversampling: int, seed: int
     return all_stats
 
 
-def _register_a_pass1_hooks(modules_by_layer, all_stats):
+def _register_a_pass1_hooks(modules_by_layer, all_stats, stats_chunk_size: int):
     hooks = []
 
     def make_hook(stats):
         def hook(_module, inp, _out):
             x = inp[0] if isinstance(inp, tuple) else inp
-            X = _prediction_slice(x.detach()).reshape(-1, x.shape[-1]).float()
-            if X.numel() == 0:
-                return
-            omega = stats["omega"].to(X.device)
-            stats["diag_sum"] += X.square().sum(dim=0).cpu()
-            stats["y_sum"] += (X.transpose(0, 1) @ (X @ omega)).cpu()
-            stats["a_count"] += X.shape[0]
+            x_sliced = _prediction_slice(x.detach())
+            omega = stats["omega"].to(x_sliced.device)
+            for X in _iter_activation_chunks(x_sliced, stats_chunk_size):
+                stats["diag_sum"] += X.square().sum(dim=0).cpu()
+                stats["y_sum"] += (X.transpose(0, 1) @ (X @ omega)).cpu()
+                stats["a_count"] += X.shape[0]
 
         return hook
 
@@ -205,19 +212,17 @@ def _register_a_pass1_hooks(modules_by_layer, all_stats):
             hooks.append(module.register_forward_hook(make_hook(all_stats[layer_idx][module_name])))
     return hooks
 
-
-def _register_a_pass2_hooks(modules_by_layer, all_stats):
+def _register_a_pass2_hooks(modules_by_layer, all_stats, stats_chunk_size: int):
     hooks = []
 
     def make_hook(stats):
         def hook(_module, inp, _out):
             x = inp[0] if isinstance(inp, tuple) else inp
-            X = _prediction_slice(x.detach()).reshape(-1, x.shape[-1]).float()
-            if X.numel() == 0:
-                return
-            Q = stats["Q"].to(X.device)
-            Z = X @ Q
-            stats["b_sum"] += (Z.transpose(0, 1) @ Z).cpu()
+            x_sliced = _prediction_slice(x.detach())
+            Q = stats["Q"].to(x_sliced.device)
+            for X in _iter_activation_chunks(x_sliced, stats_chunk_size):
+                Z = X @ Q
+                stats["b_sum"] += (Z.transpose(0, 1) @ Z).cpu()
 
         return hook
 
@@ -226,8 +231,7 @@ def _register_a_pass2_hooks(modules_by_layer, all_stats):
             hooks.append(module.register_forward_hook(make_hook(all_stats[layer_idx][module_name])))
     return hooks
 
-
-def _register_alpha_hooks(modules_by_layer, all_stats):
+def _register_alpha_hooks(modules_by_layer, all_stats, stats_chunk_size: int):
     hooks = []
 
     def make_hook(stats):
@@ -235,11 +239,13 @@ def _register_alpha_hooks(modules_by_layer, all_stats):
             out.retain_grad()
 
             def grad_hook(grad):
-                delta = _prediction_slice(grad.detach()).float()
-                if delta.numel() == 0:
+                delta_sliced = _prediction_slice(grad.detach())
+                token_count = delta_sliced.reshape(-1, delta_sliced.shape[-1]).shape[0]
+                if token_count == 0:
                     return
-                stats["alpha_sum"] += delta.square().sum(dim=(0, 1)).cpu()
-                stats["alpha_count"] += delta.shape[0] * delta.shape[1]
+                for delta in _iter_activation_chunks(delta_sliced, stats_chunk_size):
+                    stats["alpha_sum"] += delta.square().sum(dim=0).cpu()
+                stats["alpha_count"] += token_count
 
             out.register_hook(grad_hook)
 
@@ -249,7 +255,6 @@ def _register_alpha_hooks(modules_by_layer, all_stats):
         for module_name, module in modules.items():
             hooks.append(module.register_forward_hook(make_hook(all_stats[layer_idx][module_name])))
     return hooks
-
 
 def _remove_hooks(hooks) -> None:
     for hook in hooks:
@@ -324,6 +329,7 @@ def collect_endloss_dlr_stats(
     oversampling: int,
     n_calib: int,
     batch_size: int,
+    stats_chunk_size: int,
     d_min_scale: float,
     random_state: int,
     overwrite: bool,
@@ -342,7 +348,7 @@ def collect_endloss_dlr_stats(
     model, modules_by_layer, original_requires_grad = _prepare_model(analyzer)
     all_stats = _init_stat_buffers(modules_by_layer, rank, oversampling, seed=random_state)
 
-    hooks = _register_a_pass1_hooks(modules_by_layer, all_stats)
+    hooks = _register_a_pass1_hooks(modules_by_layer, all_stats, stats_chunk_size)
     total_pred_tokens = 0
     try:
         for batch in tqdm(_batch_iter(tokens, batch_size, n_calib), desc="EndLoss_DLR stats pass 1: g and AO"):
@@ -369,7 +375,7 @@ def collect_endloss_dlr_stats(
 
     _finish_a_pass1(all_stats, rank, oversampling)
 
-    hooks = _register_a_pass2_hooks(modules_by_layer, all_stats)
+    hooks = _register_a_pass2_hooks(modules_by_layer, all_stats, stats_chunk_size)
     try:
         for batch in tqdm(_batch_iter(tokens, batch_size, n_calib), desc="EndLoss_DLR stats pass 2: QTAQ"):
             batch = batch.to(model.device)
@@ -381,7 +387,7 @@ def collect_endloss_dlr_stats(
     finally:
         _remove_hooks(hooks)
 
-    hooks = _register_alpha_hooks(modules_by_layer, all_stats)
+    hooks = _register_alpha_hooks(modules_by_layer, all_stats, stats_chunk_size)
     try:
         for batch in tqdm(_batch_iter(tokens, batch_size, n_calib), desc="EndLoss_DLR stats pass 3: sampled Fisher alpha"):
             model.zero_grad(set_to_none=True)
@@ -549,6 +555,7 @@ def parse_args():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--n-calib", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--stats-chunk-size", type=int, default=1024)
     parser.add_argument("--row-batch-size", type=int, default=64)
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--oversampling", type=int, default=4)
@@ -578,7 +585,7 @@ def main():
     data_tag = f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
     stats_tag = (
         f"{data_tag}_r{args.rank}_os{args.oversampling}_ncalib{args.n_calib}"
-        f"_dmin{_tag_value(args.stats_d_min_scale)}_seed{args.random_state}"
+        f"_chunk{args.stats_chunk_size}_dmin{_tag_value(args.stats_d_min_scale)}_seed{args.random_state}"
     )
     solver_tag = (
         f"{stats_tag}_beta{_tag_value(args.beta)}_iters{args.max_outer_iters}"
@@ -647,6 +654,7 @@ def main():
         oversampling=args.oversampling,
         n_calib=args.n_calib,
         batch_size=args.batch_size,
+        stats_chunk_size=args.stats_chunk_size,
         d_min_scale=args.stats_d_min_scale,
         random_state=args.random_state,
         overwrite=args.overwrite_stats,
