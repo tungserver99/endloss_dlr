@@ -239,8 +239,8 @@ def _load_sqllm_quantized_model(
 
     for weight_file in tqdm(weight_files, desc="Materializing quantized weights", unit="layer"):
         layer_idx = int(weight_file.stem[1:])
-        layer_weights = torch.load(weight_file, map_location="cpu")
-        layer_luts = torch.load(lut_dir / weight_file.name, map_location="cpu")
+        layer_weights = torch.load(weight_file, map_location="cpu", weights_only=False)
+        layer_luts = torch.load(lut_dir / weight_file.name, map_location="cpu", weights_only=False)
 
         for module_name, indices in layer_weights.items():
             target_module = _resolve_layer_linear_module(analyzer, layer_idx, module_name)
@@ -505,4 +505,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
