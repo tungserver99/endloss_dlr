@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
+mkdir -p logs
+LOG_FILE="logs/$(basename "${BASH_SOURCE[0]}" .sh)_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+echo "Logging to ${LOG_FILE}"
+
 python endloss_dlr_quantize.py "meta-llama/Llama-2-7b-hf" \
   --stage all \
   --bits 3 \
