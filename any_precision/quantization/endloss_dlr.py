@@ -103,7 +103,7 @@ def initialize_labels_from_target(x: torch.Tensor, d: torch.Tensor, U: torch.Ten
     cumsum = torch.cumsum(rho_sorted, dim=0)
     total = cumsum[-1].clamp_min(torch.finfo(cumsum.dtype).tiny)
     thresholds = total * torch.arange(1, K, device=x.device, dtype=x.dtype) / K
-    boundaries = torch.searchsorted(cumsum, thresholds)
+    boundaries = torch.searchsorted(cumsum, thresholds, right=True)
     boundaries = _enforce_nonempty_intervals(boundaries, n=n, K=K)
 
     labels_sorted = torch.empty(n, device=x.device, dtype=torch.long)

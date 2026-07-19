@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,4 +22,7 @@ python endloss_dlr_quantize.py "meta-llama/Llama-2-7b-hf" \
   --rel-tol 1e-7 \
   --lambda-safety 1.01 \
   --device cuda \
-  --cpu-count 8
+  --cpu-count 8 \
+  --overwrite-stats \
+  --overwrite-quantize \
+  --overwrite-pack

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Tuple
@@ -77,7 +77,7 @@ def _initialize_labels_batched(x: torch.Tensor, rho_base: torch.Tensor, K: int) 
     cumsum = torch.cumsum(rho_sorted, dim=1)
     total = cumsum[:, -1:].clamp_min(torch.finfo(cumsum.dtype).tiny)
     thresholds = total * torch.arange(1, K, device=x.device, dtype=x.dtype).unsqueeze(0) / K
-    boundaries = torch.searchsorted(cumsum.contiguous(), thresholds.contiguous()).long()
+    boundaries = torch.searchsorted(cumsum.contiguous(), thresholds.contiguous(), right=True).long()
 
     lower = torch.arange(1, K, device=x.device, dtype=torch.long).unsqueeze(0)
     upper = torch.arange(n - K + 1, n, device=x.device, dtype=torch.long).unsqueeze(0)
@@ -193,6 +193,7 @@ def quantize_rows_dlr_batched(
     d_A = d_A.float().clamp_min(config.d_min)
     U_A = U_A.float()
     alpha = alpha.float().clamp_min(torch.finfo(torch.float32).tiny)
+    rows = w.shape[0]
     K = min(int(K), int(w.shape[1]))
 
     if U_A.shape[-1] == 0:
@@ -208,11 +209,16 @@ def quantize_rows_dlr_batched(
     codebook = _exact_codebook_update_batched(w, g, d_A, U_A, alpha, labels, codebook, config.beta, K)
     codebook, labels = _sort_codebook_and_remap_batched(codebook, labels)
     old_loss = _batched_loss(w, g, d_A, U_A, alpha, codebook, labels, config.beta)
+
+    active_mask = torch.ones(rows, device=w.device, dtype=torch.bool)
     fallback_rows = 0
 
     for _ in range(config.max_outer_iters):
+        if not active_mask.any():
+            break
+
         old_labels = labels.clone()
-        labels = _assignment_batched(
+        candidate_labels = _assignment_batched(
             w=w,
             g=g,
             d_A=d_A,
@@ -224,11 +230,14 @@ def quantize_rows_dlr_batched(
             beta=config.beta,
             tie_tol=config.tie_tol,
         )
-        codebook = _exact_codebook_update_batched(w, g, d_A, U_A, alpha, labels, codebook, config.beta, K)
-        codebook, labels = _sort_codebook_and_remap_batched(codebook, labels)
-        new_loss = _batched_loss(w, g, d_A, U_A, alpha, codebook, labels, config.beta)
+        candidate_codebook = _exact_codebook_update_batched(
+            w, g, d_A, U_A, alpha, candidate_labels, codebook, config.beta, K
+        )
+        candidate_codebook, candidate_labels = _sort_codebook_and_remap_batched(candidate_codebook, candidate_labels)
+        candidate_loss = _batched_loss(w, g, d_A, U_A, alpha, candidate_codebook, candidate_labels, config.beta)
+
         loss_scale = old_loss.abs().clamp_min(1.0)
-        increased = new_loss > old_loss + 1e-6 * loss_scale
+        increased = active_mask & (candidate_loss > old_loss + 1e-6 * loss_scale)
         if increased.any():
             bad_rows = torch.nonzero(increased, as_tuple=False).flatten()
             fallback_rows += int(bad_rows.numel())
@@ -243,16 +252,18 @@ def quantize_rows_dlr_batched(
                     K=K,
                     config=config,
                 )
-                codebook[row] = row_codebook
-                labels[row] = row_labels
-                new_loss[row] = row_loss
+                candidate_codebook[row] = row_codebook
+                candidate_labels[row] = row_labels
+                candidate_loss[row] = row_loss
+
+        labels = torch.where(active_mask.unsqueeze(1), candidate_labels, labels)
+        codebook = torch.where(active_mask.unsqueeze(1), candidate_codebook, codebook)
+        new_loss = torch.where(active_mask, candidate_loss, old_loss)
+
         relative_drop = (old_loss - new_loss).abs() / loss_scale
         labels_unchanged = (labels == old_labels).all(dim=1)
+        row_done = active_mask & (labels_unchanged | (relative_drop <= config.rel_tol) | increased)
         old_loss = new_loss
-        if (labels_unchanged | (relative_drop <= config.rel_tol)).all():
-            break
+        active_mask = active_mask & ~row_done
 
     return BatchedDLRResult(labels=labels, codebooks=codebook, losses=old_loss, fallback_rows=fallback_rows)
-
-
-

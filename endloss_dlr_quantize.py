@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """From-scratch EndLoss_DLR scalar quantization.
 
 This path does not consume an existing SqueezeLLM cache. It collects end-loss
@@ -16,10 +16,9 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
-import math
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -52,6 +51,8 @@ class EndLossDLRQuantStats:
             setattr(self, field, getattr(self, field) + getattr(other, field))
 
 
+def _tag_value(value) -> str:
+    return str(value).replace("-", "m").replace(".", "p").replace("+", "")
 def normalize_tokens(tokens, seq_len: int) -> torch.Tensor:
     if isinstance(tokens, torch.Tensor):
         if tokens.ndim == 2:
@@ -409,6 +410,8 @@ def quantize_module_from_scratch(
     bits: int,
     config: DLRConfig,
     row_batch_size: int,
+    layer_idx: int | None = None,
+    module_name: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, EndLossDLRQuantStats]:
     device = W_fp.device
     W_fp = W_fp.float()
@@ -438,15 +441,30 @@ def quantize_module_from_scratch(
                 K=K,
                 config=config,
             )
-        except RuntimeError:
-            stats.rows_fallback += end - start
-            for row_idx in range(start, end):
-                fallback = torch.linspace(W_fp[row_idx].min(), W_fp[row_idx].max(), K, device=device, dtype=torch.float32)
-                dist = (W_fp[row_idx].unsqueeze(-1) - fallback.unsqueeze(0)).abs()
-                labels = dist.argmin(dim=-1).long()
-                labels_out[row_idx, 0] = labels.detach().cpu().to(torch.uint8)
-                lut_out[row_idx, 0] = fallback.detach().cpu().to(torch.float16)
-            continue
+        except RuntimeError as exc:
+            retry_config = replace(config, lambda_safety=max(config.lambda_safety * 1.05, 1.05))
+            location = f"layer={layer_idx}, module={module_name}, rows=[{start},{end})"
+            logging.warning(
+                "EndLoss_DLR batched solve failed at %s with lambda_safety=%s; retrying with lambda_safety=%s. Error: %s",
+                location,
+                config.lambda_safety,
+                retry_config.lambda_safety,
+                exc,
+            )
+            try:
+                result = quantize_rows_dlr_batched(
+                    w=W_fp[start:end],
+                    g=g[start:end],
+                    d_A=d_A,
+                    U_A=U_A,
+                    alpha=alpha[start:end],
+                    K=K,
+                    config=retry_config,
+                )
+            except RuntimeError as retry_exc:
+                raise RuntimeError(
+                    f"EndLoss_DLR failed after retry at {location}; refusing to fall back to another quantizer."
+                ) from retry_exc
 
         labels_out[start:end, 0] = result.labels.detach().cpu().to(torch.uint8)
         lut_out[start:end, 0] = result.codebooks.detach().cpu().to(torch.float16)
@@ -455,7 +473,6 @@ def quantize_module_from_scratch(
         stats.objective_sum += float(result.losses.sum().item())
 
     return labels_out, lut_out, stats
-
 
 def quantize_endloss_dlr_cache(
     analyzer,
@@ -498,6 +515,8 @@ def quantize_endloss_dlr_cache(
                 bits=bits,
                 config=config,
                 row_batch_size=row_batch_size,
+                layer_idx=layer_idx,
+                module_name=module_name,
             )
             totals.add(module_totals)
             out_weights[module_name] = labels.numpy()
@@ -556,9 +575,19 @@ def main():
     args = parse_args()
 
     model_name = args.model.rstrip("/").split("/")[-1]
-    run_tag = f"{model_name}-w{args.bits}-endloss-dlr-{args.dataset}_s{args.num_examples}_blk{args.seq_len}_r{args.rank}"
-    args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}.pt"
-    args.stats_path = args.stats_path or f"{args.cache_dir}/endloss_dlr_stats/{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}_r{args.rank}"
+    data_tag = f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
+    stats_tag = (
+        f"{data_tag}_r{args.rank}_os{args.oversampling}_ncalib{args.n_calib}"
+        f"_dmin{_tag_value(args.stats_d_min_scale)}_seed{args.random_state}"
+    )
+    solver_tag = (
+        f"{stats_tag}_beta{_tag_value(args.beta)}_iters{args.max_outer_iters}"
+        f"_rtol{_tag_value(args.rel_tol)}_lambda{_tag_value(args.lambda_safety)}"
+        f"_sdmin{_tag_value(args.solver_d_min)}"
+    )
+    run_tag = f"{model_name}-w{args.bits}-endloss-dlr-{solver_tag}"
+    args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{data_tag}.pt"
+    args.stats_path = args.stats_path or f"{args.cache_dir}/endloss_dlr_stats/{stats_tag}"
     args.quantized_path = args.quantized_path or f"{args.cache_dir}/endloss_dlr_quantized/{run_tag}"
     args.output_packed_path = args.output_packed_path or f"{args.cache_dir}/endloss_dlr_packed/anyprec-{run_tag}"
 
