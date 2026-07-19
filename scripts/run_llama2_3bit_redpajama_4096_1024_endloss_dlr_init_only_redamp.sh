@@ -35,6 +35,29 @@ python scripts/redamp_endloss_dlr_stats.py \
   --new-damping-ratio 1e-2 \
   --overwrite
 
+python - <<'PY'
+from pathlib import Path
+import torch
+stats = Path("cache/endloss_dlr_stats/fastwgf_v2_Llama-2-7b-hf-redpajama_s1024_blk4096_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p01_seed0")
+files = list(stats.glob("l*.pt"))
+config = torch.load(stats / "_config.pt", map_location="cpu")
+assert len(files) == 32, f"redamped stats incomplete: {len(files)} layer files"
+assert config == {
+    "stats_method": "fast_weight_gradient_fisher_v2",
+    "rank": 4,
+    "oversampling": 4,
+    "n_calib": 1024,
+    "batch_size": 1,
+    "device": "cuda",
+    "fisher_probes": 16,
+    "gradient_num_examples": None,
+    "stats_layer_chunk_size": 8,
+    "num_output_groups": 8,
+    "damping_ratio": 1e-2,
+}, config
+print(f"Redamped stats cache ready and config-matched: {stats}")
+PY
+
 python endloss_dlr_quantize.py "${MODEL}" \
   --stage all \
   --bits 3 \

@@ -42,13 +42,20 @@ def main() -> None:
         shutil.rmtree(dst)
     dst.mkdir(parents=True, exist_ok=True)
 
-    config_path = src / "_config.pt"
-    if config_path.exists():
-        config = torch.load(config_path, map_location="cpu")
-        config["damping_ratio"] = float(args.new_damping_ratio)
-        config["redamped_from"] = str(src)
-        config["old_damping_ratio"] = float(args.old_damping_ratio)
-        torch.save(config, dst / "_config.pt")
+    stats_config = {
+        "stats_method": "fast_weight_gradient_fisher_v2",
+        "rank": 4,
+        "oversampling": 4,
+        "n_calib": 1024,
+        "batch_size": 1,
+        "device": "cuda",
+        "fisher_probes": 16,
+        "gradient_num_examples": None,
+        "stats_layer_chunk_size": 8,
+        "num_output_groups": 8,
+        "damping_ratio": float(args.new_damping_ratio),
+    }
+    torch.save(stats_config, dst / "_config.pt")
 
     changed_modules = 0
     max_scale = 0.0

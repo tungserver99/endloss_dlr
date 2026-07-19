@@ -454,11 +454,16 @@ def collect_endloss_dlr_stats_fast(
             config_matches = torch.load(config_path, map_location="cpu") == stats_config
         except Exception:
             config_matches = False
-    if not overwrite and expected and all(path.exists() for path in expected) and config_matches:
+    cache_complete = bool(expected) and all(path.exists() for path in expected)
+    if not overwrite and cache_complete and config_matches:
         logging.info("Cached fast EndLoss_DLR stats found in %s", output_folder)
         return
-    if not overwrite and expected and all(path.exists() for path in expected) and not config_matches:
-        logging.warning("Existing EndLoss_DLR stats cache config mismatch or missing metadata; recomputing: %s", output_folder)
+    if not overwrite and cache_complete and not config_matches:
+        raise RuntimeError(
+            "Existing EndLoss_DLR stats cache is complete but config metadata mismatches. "
+            f"Refusing to recompute expensive gradients implicitly: {output_folder}. "
+            "Use --overwrite-stats explicitly if recomputation is intended."
+        )
     if overwrite or not config_matches:
         for path in expected:
             if path.exists():
