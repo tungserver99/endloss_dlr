@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import gc
 import json
 import pickle
@@ -210,7 +211,8 @@ def _load_sqllm_quantized_model(
 
     lut_dir = lut_dirs[-1]
     analyzer = get_analyzer(model)
-    weight_files = sorted(weight_dir.glob("l*.pt"), key=lambda p: int(p.stem[1:]))
+    layer_file_pattern = re.compile(r"^l\d+\.pt$")
+    weight_files = sorted((p for p in weight_dir.glob("l*.pt") if layer_file_pattern.match(p.name)), key=lambda p: int(p.stem[1:]))
 
     for weight_file in tqdm(weight_files, desc="Materializing quantized weights", unit="layer"):
         layer_idx = int(weight_file.stem[1:])
