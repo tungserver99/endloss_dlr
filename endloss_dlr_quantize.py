@@ -643,14 +643,6 @@ def quantize_endloss_dlr_cache(
                 layer_idx=layer_idx,
                 module_name=module_name,
             )
-            if config.max_outer_iters == 0:
-                logging.info(
-                    "Initial DLR objective | layer=%d module=%s rows=%d objective_sum=%.6e",
-                    layer_idx,
-                    module_name,
-                    module_totals.rows_quantized,
-                    module_totals.objective_sum,
-                )
             totals.add(module_totals)
             out_weights[module_name] = labels.numpy()
             out_luts[module_name] = luts
@@ -828,6 +820,8 @@ def main():
         layer_range=tuple(args.layer_range) if args.layer_range else None,
         row_batch_size=args.row_batch_size,
     )
+    if args.max_outer_iters == 0:
+        logging.info("Initial DLR objective | rows=%d objective_sum=%.6e", totals.rows_quantized, totals.objective_sum)
     logging.info(
         "EndLoss_DLR quantize summary | rows_total=%d rows_quantized=%d rows_fallback=%d objective_sum=%.6e",
         totals.rows_total,
