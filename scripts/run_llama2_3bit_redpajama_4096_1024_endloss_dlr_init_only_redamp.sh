@@ -14,8 +14,13 @@ MODEL="meta-llama/Llama-2-7b-hf"
 MODEL_BASENAME="${MODEL##*/}"
 DATA_TAG="${MODEL_BASENAME}-redpajama_s1024_blk4096"
 BASE_STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
+LEGACY_BASE_STATS_TAG="${DATA_TAG}_r4_os4_ncalib1024_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
 REDAMP_STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p01_seed0"
 BASE_STATS_PATH="cache/endloss_dlr_stats/${BASE_STATS_TAG}"
+LEGACY_BASE_STATS_PATH="cache/endloss_dlr_stats/${LEGACY_BASE_STATS_TAG}"
+if [[ ! -d "${BASE_STATS_PATH}" && -d "${LEGACY_BASE_STATS_PATH}" ]]; then
+  BASE_STATS_PATH="${LEGACY_BASE_STATS_PATH}"
+fi
 REDAMP_STATS_PATH="cache/endloss_dlr_stats/${REDAMP_STATS_TAG}"
 SOLVER_TAG="${REDAMP_STATS_TAG}_beta0p5_iters0_rtol1em07_lambda1p01_sdmin1em08"
 RUN_TAG="${MODEL_BASENAME}-w3-endloss-dlr-${SOLVER_TAG}"
