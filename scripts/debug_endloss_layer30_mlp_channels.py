@@ -97,8 +97,11 @@ def main() -> None:
 
     print("CHANNELS channel\tmlp_input\tgate\tsilu_gate\tup\tproduct")
     for channel in args.channels:
+        mlp_input_value = "N/A"
+        if channel < h_tok.numel():
+            mlp_input_value = f"{float(h_tok[channel].float().item()):.6e}"
         print(
-            f"{channel}\t{float(h_tok[channel].float().item()):.6e}\t"
+            f"{channel}\t{mlp_input_value}\t"
             f"{float(gate[channel].float().item()):.6e}\t"
             f"{float(silu_gate[channel].float().item()):.6e}\t"
             f"{float(up[channel].float().item()):.6e}\t"
