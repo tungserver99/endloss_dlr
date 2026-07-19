@@ -162,6 +162,20 @@ def normalize_tokens(tokens, seq_len: int) -> torch.Tensor:
     raise TypeError(f"Unsupported token cache type: {type(tokens).__name__}")
 
 
+
+def _row_group_ranges(num_rows: int, num_groups: int) -> list[tuple[int, int]]:
+    num_groups = max(1, min(int(num_groups), int(num_rows)))
+    base = int(num_rows) // num_groups
+    rem = int(num_rows) % num_groups
+    ranges = []
+    start = 0
+    for group_idx in range(num_groups):
+        size = base + (1 if group_idx < rem else 0)
+        end = start + size
+        ranges.append((start, end))
+        start = end
+    return ranges
+
 def _module_name_candidates(module_name: str) -> list[str]:
     candidates = [module_name]
     if module_name.startswith("self_attn."):
