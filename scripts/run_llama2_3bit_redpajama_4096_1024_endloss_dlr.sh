@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
+source "${SCRIPT_DIR}/load_env.sh"
 
 mkdir -p logs
 LOG_FILE="logs/$(basename "${BASH_SOURCE[0]}" .sh)_$(date +%Y%m%d_%H%M%S).log"
@@ -25,8 +26,10 @@ EVAL_STRIDE="512"
 EVAL_MAX_LENGTH="2048"
 EVAL_C4_SAMPLES="2000"
 EVAL_DTYPE="float16"
-HF_TOKEN="${HF_TOKEN:-}"
-
+HF_TOKEN_ARGS=()
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  HF_TOKEN_ARGS=(--hf-token "${HF_TOKEN}")
+fi
 python endloss_dlr_quantize.py "${MODEL}" \
   --stage all \
   --bits 3 \
@@ -65,5 +68,5 @@ python scripts/eval_nonuquant_style_ppl.py \
   --stride "${EVAL_STRIDE}" \
   --max-length "${EVAL_MAX_LENGTH}" \
   --c4-samples "${EVAL_C4_SAMPLES}" \
-  --hf-token "${HF_TOKEN}" \
+  "${HF_TOKEN_ARGS[@]}" \
   --output-file "${OUTPUT_FILE}"

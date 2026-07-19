@@ -16,51 +16,21 @@ MODEL_BASENAME="${MODEL##*/}"
 DATA_TAG="${MODEL_BASENAME}-redpajama_s1024_blk4096"
 BASE_STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
 LEGACY_BASE_STATS_TAG="${DATA_TAG}_r4_os4_ncalib1024_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
-REDAMP_STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p01_seed0"
 BASE_STATS_PATH="cache/endloss_dlr_stats/${BASE_STATS_TAG}"
 LEGACY_BASE_STATS_PATH="cache/endloss_dlr_stats/${LEGACY_BASE_STATS_TAG}"
 if [[ ! -d "${BASE_STATS_PATH}" && -d "${LEGACY_BASE_STATS_PATH}" ]]; then
   BASE_STATS_PATH="${LEGACY_BASE_STATS_PATH}"
 fi
-REDAMP_STATS_PATH="cache/endloss_dlr_stats/${REDAMP_STATS_TAG}"
-SOLVER_TAG="${REDAMP_STATS_TAG}_beta0p5_iters0_rtol1em07_lambda1p01_sdmin1em08"
-RUN_TAG="${MODEL_BASENAME}-w3-endloss-dlr-${SOLVER_TAG}"
-QUANTIZED_PATH="cache/endloss_dlr_quantized/${RUN_TAG}"
-PACKED_PATH="cache/endloss_dlr_packed/anyprec-${RUN_TAG}"
-OUTPUT_FILE="results/anyprec-${RUN_TAG}.json"
 HF_TOKEN_ARGS=()
 if [[ -n "${HF_TOKEN:-}" ]]; then
   HF_TOKEN_ARGS=(--hf-token "${HF_TOKEN}")
 fi
-python scripts/redamp_endloss_dlr_stats.py \
-  "${BASE_STATS_PATH}" \
-  "${REDAMP_STATS_PATH}" \
-  --old-damping-ratio 1e-4 \
-  --new-damping-ratio 1e-2 \
-  --overwrite
-
-python - <<'PY'
-from pathlib import Path
-import torch
-stats = Path("cache/endloss_dlr_stats/fastwgf_v2_Llama-2-7b-hf-redpajama_s1024_blk4096_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p01_seed0")
-files = list(stats.glob("l*.pt"))
-config = torch.load(stats / "_config.pt", map_location="cpu")
-assert len(files) == 32, f"redamped stats incomplete: {len(files)} layer files"
-assert config == {
-    "stats_method": "fast_weight_gradient_fisher_v2",
-    "rank": 4,
-    "oversampling": 4,
-    "n_calib": 1024,
-    "batch_size": 1,
-    "device": "cuda",
-    "fisher_probes": 16,
-    "gradient_num_examples": None,
-    "stats_layer_chunk_size": 8,
-    "num_output_groups": 8,
-    "damping_ratio": 1e-2,
-}, config
-print(f"Redamped stats cache ready and config-matched: {stats}")
-PY
+STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
+SOLVER_TAG="${STATS_TAG}_beta0_iters0_rtol1em07_lambda1p01_sdmin1em08"
+RUN_TAG="${MODEL_BASENAME}-w3-endloss-dlr-${SOLVER_TAG}"
+QUANTIZED_PATH="cache/endloss_dlr_quantized/${RUN_TAG}"
+PACKED_PATH="cache/endloss_dlr_packed/anyprec-${RUN_TAG}"
+OUTPUT_FILE="results/anyprec-${RUN_TAG}-wikitext2.json"
 
 python endloss_dlr_quantize.py "${MODEL}" \
   --stage all \
@@ -75,33 +45,32 @@ python endloss_dlr_quantize.py "${MODEL}" \
   --fisher-probes 16 \
   --stats-layer-chunk-size 8 \
   --num-output-groups 8 \
-  --damping-ratio 1e-2 \
+  --damping-ratio 1e-4 \
   --row-batch-size 64 \
   --rank 4 \
   --oversampling 4 \
-  --beta 0.5 \
+  --beta 0.0 \
   --max-outer-iters 0 \
   --rel-tol 1e-7 \
   --lambda-safety 1.01 \
   --device cuda \
   --cpu-count 8 \
-  --stats-path "${REDAMP_STATS_PATH}" \
+  --stats-path "${BASE_STATS_PATH}" \
   --quantized-path "${QUANTIZED_PATH}" \
   --output-packed-path "${PACKED_PATH}" \
   --overwrite-quantize \
   --overwrite-pack
 
-python scripts/check_endloss_dlr_cache.py "${QUANTIZED_PATH}" --warn-abs 100 --topk 30
+python scripts/check_endloss_dlr_cache.py "${QUANTIZED_PATH}" --warn-abs 100 --topk 20
 
 python scripts/eval_nonuquant_style_ppl.py \
   --model-path "${MODEL}" \
   --quantized-path "${QUANTIZED_PATH}" \
   --model-name "anyprec-${RUN_TAG}" \
   --tokenizer-path "${MODEL}" \
-  --datasets wikitext2 c4 \
+  --datasets wikitext2 \
   --dtype float16 \
   --stride 512 \
   --max-length 2048 \
-  --c4-samples 2000 \
   "${HF_TOKEN_ARGS[@]}" \
   --output-file "${OUTPUT_FILE}"

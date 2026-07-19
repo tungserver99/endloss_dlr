@@ -29,6 +29,15 @@ def main() -> None:
     parser.add_argument("dst")
     parser.add_argument("--old-damping-ratio", type=float, default=1e-4)
     parser.add_argument("--new-damping-ratio", type=float, required=True)
+    parser.add_argument("--rank", type=int, default=4)
+    parser.add_argument("--oversampling", type=int, default=4)
+    parser.add_argument("--n-calib", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--fisher-probes", type=int, default=16)
+    parser.add_argument("--gradient-num-examples", type=int, default=None)
+    parser.add_argument("--stats-layer-chunk-size", type=int, default=8)
+    parser.add_argument("--num-output-groups", type=int, default=8)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -44,15 +53,15 @@ def main() -> None:
 
     stats_config = {
         "stats_method": "fast_weight_gradient_fisher_v2",
-        "rank": 4,
-        "oversampling": 4,
-        "n_calib": 1024,
-        "batch_size": 1,
-        "device": "cuda",
-        "fisher_probes": 16,
-        "gradient_num_examples": None,
-        "stats_layer_chunk_size": 8,
-        "num_output_groups": 8,
+        "rank": int(args.rank),
+        "oversampling": int(args.oversampling),
+        "n_calib": int(args.n_calib),
+        "batch_size": int(args.batch_size),
+        "device": str(args.device),
+        "fisher_probes": int(args.fisher_probes),
+        "gradient_num_examples": None if args.gradient_num_examples is None else int(args.gradient_num_examples),
+        "stats_layer_chunk_size": int(args.stats_layer_chunk_size),
+        "num_output_groups": int(args.num_output_groups),
         "damping_ratio": float(args.new_damping_ratio),
     }
     torch.save(stats_config, dst / "_config.pt")
