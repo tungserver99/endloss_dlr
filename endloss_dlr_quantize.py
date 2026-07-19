@@ -56,6 +56,84 @@ class EndLossDLRQuantStats:
 
 def _tag_value(value) -> str:
     return str(value).replace("-", "m").replace(".", "p").replace("+", "")
+
+def build_fast_stats_config(
+    rank: int,
+    oversampling: int,
+    n_calib: int,
+    batch_size: int,
+    device: str,
+    fisher_probes: int,
+    gradient_num_examples: int | None,
+    stats_layer_chunk_size: int,
+    num_output_groups: int,
+    damping_ratio: float,
+) -> dict:
+    return {
+        "stats_method": "fast_weight_gradient_fisher_v2",
+        "rank": int(rank),
+        "oversampling": int(oversampling),
+        "n_calib": int(n_calib),
+        "batch_size": int(batch_size),
+        "device": str(device),
+        "fisher_probes": int(fisher_probes),
+        "gradient_num_examples": None if gradient_num_examples is None else int(gradient_num_examples),
+        "stats_layer_chunk_size": int(stats_layer_chunk_size),
+        "num_output_groups": int(num_output_groups),
+        "damping_ratio": float(damping_ratio),
+    }
+
+
+def resolve_legacy_fast_stats_cache(
+    args,
+    analyzer,
+    data_tag: str,
+    default_stats_path: str,
+) -> str:
+    if args.overwrite_stats:
+        return default_stats_path
+
+    default_path = Path(default_stats_path)
+    default_expected = [default_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
+    if default_expected and all(path.exists() for path in default_expected):
+        return default_stats_path
+
+    legacy_tag = (
+        f"{data_tag}_r{args.rank}_os{args.oversampling}"
+        f"_ncalib{args.n_calib}_fprobe{args.fisher_probes}_gex{args.gradient_num_examples or args.n_calib}"
+        f"_lchunk{args.stats_layer_chunk_size}_og{args.num_output_groups}"
+        f"_damp{_tag_value(args.damping_ratio)}_seed{args.random_state}"
+    )
+    legacy_path = Path(args.cache_dir) / "endloss_dlr_stats" / legacy_tag
+    expected = [legacy_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
+    if not expected or not all(path.exists() for path in expected):
+        return default_stats_path
+
+    stats_config = build_fast_stats_config(
+        rank=args.rank,
+        oversampling=args.oversampling,
+        n_calib=args.n_calib,
+        batch_size=args.batch_size,
+        device=args.device,
+        fisher_probes=args.fisher_probes,
+        gradient_num_examples=args.gradient_num_examples,
+        stats_layer_chunk_size=args.stats_layer_chunk_size,
+        num_output_groups=args.num_output_groups,
+        damping_ratio=args.damping_ratio,
+    )
+    config_path = legacy_path / "_config.pt"
+    if config_path.exists():
+        try:
+            if torch.load(config_path, map_location="cpu") != stats_config:
+                return default_stats_path
+        except Exception:
+            return default_stats_path
+    else:
+        torch.save(stats_config, config_path)
+
+    logging.info("Using legacy EndLoss_DLR stats cache: %s", legacy_path)
+    return str(legacy_path)
+
 def normalize_tokens(tokens, seq_len: int) -> torch.Tensor:
     if isinstance(tokens, torch.Tensor):
         if tokens.ndim == 2:
@@ -343,19 +421,18 @@ def collect_endloss_dlr_stats_fast(
     output_path = Path(output_folder)
     output_path.mkdir(parents=True, exist_ok=True)
     expected = [output_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
-    stats_config = {
-        "stats_method": "fast_weight_gradient_fisher_v2",
-        "rank": int(rank),
-        "oversampling": int(oversampling),
-        "n_calib": int(n_calib),
-        "batch_size": int(batch_size),
-        "device": str(device),
-        "fisher_probes": int(fisher_probes),
-        "gradient_num_examples": None if gradient_num_examples is None else int(gradient_num_examples),
-        "stats_layer_chunk_size": int(stats_layer_chunk_size),
-        "num_output_groups": int(num_output_groups),
-        "damping_ratio": float(damping_ratio),
-    }
+    stats_config = build_fast_stats_config(
+        rank=rank,
+        oversampling=oversampling,
+        n_calib=n_calib,
+        batch_size=batch_size,
+        device=device,
+        fisher_probes=fisher_probes,
+        gradient_num_examples=gradient_num_examples,
+        stats_layer_chunk_size=stats_layer_chunk_size,
+        num_output_groups=num_output_groups,
+        damping_ratio=damping_ratio,
+    )
     config_path = output_path / "_config.pt"
     config_matches = False
     if config_path.exists():
@@ -552,6 +629,14 @@ def quantize_endloss_dlr_cache(
                 layer_idx=layer_idx,
                 module_name=module_name,
             )
+            if config.max_outer_iters == 0:
+                logging.info(
+                    "Initial DLR objective | layer=%d module=%s rows=%d objective_sum=%.6e",
+                    layer_idx,
+                    module_name,
+                    module_totals.rows_quantized,
+                    module_totals.objective_sum,
+                )
             totals.add(module_totals)
             out_weights[module_name] = labels.numpy()
             out_luts[module_name] = luts
@@ -630,12 +715,16 @@ def main():
     )
     run_tag = f"{model_name}-w{args.bits}-endloss-dlr-{solver_tag}"
     args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{data_tag}.pt"
-    args.stats_path = args.stats_path or f"{args.cache_dir}/endloss_dlr_stats/{stats_tag}"
+    explicit_stats_path = bool(args.stats_path)
+    default_stats_path = f"{args.cache_dir}/endloss_dlr_stats/{stats_tag}"
+    args.stats_path = args.stats_path or default_stats_path
     args.quantized_path = args.quantized_path or f"{args.cache_dir}/endloss_dlr_quantized/{run_tag}"
     args.output_packed_path = args.output_packed_path or f"{args.cache_dir}/endloss_dlr_packed/anyprec-{run_tag}"
 
     logging.info("Loading model/analyzer: %s", args.model)
     analyzer = get_analyzer(args.model, include_tokenizer=True)
+    if not explicit_stats_path:
+        args.stats_path = resolve_legacy_fast_stats_cache(args, analyzer, data_tag, default_stats_path)
 
     if args.dataset == "redpajama" and args.redpajama_dataset_repo is not None:
         os.environ["REDPAJAMA_DATASET_REPO"] = args.redpajama_dataset_repo
@@ -710,6 +799,10 @@ def main():
         d_min=args.solver_d_min,
         tie_tol=args.tie_tol,
     )
+    if args.max_outer_iters == 0:
+        logging.info("EndLoss_DLR mode: initialization-only (max_outer_iters=0)")
+    else:
+        logging.info("EndLoss_DLR mode: full MM solver (max_outer_iters=%d)", args.max_outer_iters)
     totals = quantize_endloss_dlr_cache(
         analyzer=analyzer,
         stats_folder=args.stats_path,
@@ -753,6 +846,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 

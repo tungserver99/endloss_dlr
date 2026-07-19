@@ -39,11 +39,15 @@ def dlr_loss(
     labels: torch.Tensor,
     beta: float,
 ) -> torch.Tensor:
-    q = codebook[labels.long()]
-    e = q - w
-    h = U.transpose(-1, -2) @ e
-    return beta * torch.dot(g, e) + 0.5 * torch.dot(d, e.square()) + 0.5 * torch.dot(h, h)
-
+    w64 = w.double()
+    g64 = g.double()
+    d64 = d.double()
+    U64 = U.double()
+    codebook64 = codebook.double()
+    q = codebook64[labels.long()]
+    e = q - w64
+    h = U64.transpose(-1, -2) @ e
+    return beta * torch.dot(g64, e) + 0.5 * torch.dot(d64, e.square()) + 0.5 * torch.dot(h, h)
 
 def spectral_lambda(U: torch.Tensor, safety: float = 1.01) -> torch.Tensor:
     if U.numel() == 0:
@@ -138,30 +142,38 @@ def exact_dlr_codebook_update(
     beta: float,
     K: int,
 ) -> torch.Tensor:
-    A = _scatter_sum(d, labels, K)
-    B = _scatter_sum(d * w, labels, K)
-    G = _scatter_sum(g, labels, K)
-    M = _scatter_sum_rows(U, labels, K)
+    w64 = w.double()
+    g64 = g.double()
+    d64 = d.double()
+    U64 = U.double()
+    old_codebook64 = old_codebook.double()
+    A = _scatter_sum(d64, labels, K)
+    B = _scatter_sum(d64 * w64, labels, K)
+    G = _scatter_sum(g64, labels, K)
+    M = _scatter_sum_rows(U64, labels, K)
 
     b = B - beta * G
-    z = U.transpose(-1, -2) @ w
+    z = U64.transpose(-1, -2) @ w64
     active = A > 0
 
-    new_codebook = old_codebook.clone()
+    new_codebook = old_codebook64.clone()
     if not active.any():
-        return new_codebook
+        return new_codebook.to(dtype=old_codebook.dtype)
 
     A_a = A[active]
     b_a = b[active]
     M_a = M[active]
 
+    if U64.shape[-1] == 0:
+        new_codebook[active] = b_a / A_a.clamp_min(torch.finfo(A_a.dtype).tiny)
+        return new_codebook.to(dtype=old_codebook.dtype)
+
     Q = torch.einsum("kr,ks,k->rs", M_a, M_a, 1.0 / A_a)
     v = (M_a * (b_a / A_a).unsqueeze(-1)).sum(dim=0) - z
-    R = torch.eye(U.shape[-1], device=U.device, dtype=U.dtype) + Q
+    R = torch.eye(U64.shape[-1], device=U64.device, dtype=U64.dtype) + Q
     h = torch.linalg.solve(R, v)
     new_codebook[active] = (b_a - M_a @ h) / A_a
-    return new_codebook
-
+    return new_codebook.to(dtype=old_codebook.dtype)
 
 def sort_codebook_and_remap_labels(codebook: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     sorted_codebook, perm = torch.sort(codebook)

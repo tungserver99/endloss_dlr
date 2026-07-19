@@ -39,12 +39,17 @@ def _batched_loss(
     labels: torch.Tensor,
     beta: float,
 ) -> torch.Tensor:
-    q = torch.gather(codebook, 1, labels.long())
-    e = q - w
-    h = e @ U_A
-    curvature = (d_A.unsqueeze(0) * e.square()).sum(dim=1) + h.square().sum(dim=1)
-    return beta * (g * e).sum(dim=1) + 0.5 * alpha * curvature
-
+    w64 = w.double()
+    g64 = g.double()
+    d64 = d_A.double()
+    U64 = U_A.double()
+    alpha64 = alpha.double()
+    codebook64 = codebook.double()
+    q = torch.gather(codebook64, 1, labels.long())
+    e = q - w64
+    h = e @ U64
+    curvature = (d64.unsqueeze(0) * e.square()).sum(dim=1) + h.square().sum(dim=1)
+    return beta * (g64 * e).sum(dim=1) + 0.5 * alpha64 * curvature
 
 def _continuous_target_batched(
     w: torch.Tensor,
@@ -117,32 +122,37 @@ def _exact_codebook_update_batched(
     K: int,
 ) -> torch.Tensor:
     rows = w.shape[0]
-    d_expand = d_A.unsqueeze(0).expand(rows, -1)
-    U_expand = U_A.unsqueeze(0).expand(rows, -1, -1)
+    w64 = w.double()
+    g64 = g.double()
+    d64 = d_A.double()
+    U64 = U_A.double()
+    alpha64 = alpha.double()
+    old_codebook64 = old_codebook.double()
+    d_expand = d64.unsqueeze(0).expand(rows, -1)
+    U_expand = U64.unsqueeze(0).expand(rows, -1, -1)
 
     A_base = _scatter_sum_batched(d_expand, labels, K)
-    B_base = _scatter_sum_batched(d_expand * w, labels, K)
-    G = _scatter_sum_batched(g, labels, K)
+    B_base = _scatter_sum_batched(d_expand * w64, labels, K)
+    G = _scatter_sum_batched(g64, labels, K)
     M_base = _scatter_sum_rows_batched(U_expand, labels, K)
 
-    A = alpha.unsqueeze(1) * A_base
-    b = alpha.unsqueeze(1) * B_base - beta * G
-    sqrt_alpha = alpha.sqrt()
+    A = alpha64.unsqueeze(1) * A_base
+    b = alpha64.unsqueeze(1) * B_base - beta * G
+    sqrt_alpha = alpha64.sqrt()
     M = sqrt_alpha[:, None, None] * M_base
-    z = sqrt_alpha[:, None] * (w @ U_A)
+    z = sqrt_alpha[:, None] * (w64 @ U64)
     active = A > 0
 
     inv_A = torch.where(active, 1.0 / A.clamp_min(torch.finfo(A.dtype).tiny), torch.zeros_like(A))
     Q = torch.einsum("bkr,bks,bk->brs", M, M, inv_A)
     v = (M * (b * inv_A).unsqueeze(-1)).sum(dim=1) - z
-    eye = torch.eye(U_A.shape[-1], device=w.device, dtype=w.dtype).unsqueeze(0).expand(rows, -1, -1)
-    if U_A.shape[-1] == 0:
+    if U64.shape[-1] == 0:
         h = v
     else:
+        eye = torch.eye(U64.shape[-1], device=w.device, dtype=torch.float64).unsqueeze(0).expand(rows, -1, -1)
         h = torch.linalg.solve(eye + Q, v.unsqueeze(-1)).squeeze(-1)
     updated = (b - torch.einsum("bkr,br->bk", M, h)) / A.clamp_min(torch.finfo(A.dtype).tiny)
-    return torch.where(active, updated, old_codebook)
-
+    return torch.where(active, updated, old_codebook64).to(dtype=old_codebook.dtype)
 
 def _sort_codebook_and_remap_batched(codebook: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     sorted_codebook, perm = torch.sort(codebook, dim=1)
@@ -239,22 +249,11 @@ def quantize_rows_dlr_batched(
         loss_scale = old_loss.abs().clamp_min(1.0)
         increased = active_mask & (candidate_loss > old_loss + 1e-6 * loss_scale)
         if increased.any():
-            bad_rows = torch.nonzero(increased, as_tuple=False).flatten()
-            fallback_rows += int(bad_rows.numel())
-            for row in bad_rows.tolist():
-                U_row = alpha[row].sqrt() * U_A
-                d_row = alpha[row] * d_A
-                row_codebook, row_labels, row_loss = quantize_group_dlr(
-                    w=w[row],
-                    g=g[row],
-                    d=d_row,
-                    U=U_row,
-                    K=K,
-                    config=config,
-                )
-                candidate_codebook[row] = row_codebook
-                candidate_labels[row] = row_labels
-                candidate_loss[row] = row_loss
+            max_increase = float((candidate_loss - old_loss)[increased].max().item())
+            raise RuntimeError(
+                "DLR loss unexpectedly increased "
+                f"for {int(increased.sum().item())} rows; max increase={max_increase:.3e}"
+            )
 
         labels = torch.where(active_mask.unsqueeze(1), candidate_labels, labels)
         codebook = torch.where(active_mask.unsqueeze(1), candidate_codebook, codebook)
@@ -262,7 +261,7 @@ def quantize_rows_dlr_batched(
 
         relative_drop = (old_loss - new_loss).abs() / loss_scale
         labels_unchanged = (labels == old_labels).all(dim=1)
-        row_done = active_mask & (labels_unchanged | (relative_drop <= config.rel_tol) | increased)
+        row_done = active_mask & (labels_unchanged | (relative_drop <= config.rel_tol))
         old_loss = new_loss
         active_mask = active_mask & ~row_done
 
