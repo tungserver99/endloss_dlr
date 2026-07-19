@@ -103,10 +103,20 @@ def _initialize_labels_batched(x: torch.Tensor, rho_base: torch.Tensor, K: int) 
     return labels
 
 
-def _initial_codebook_batched(x: torch.Tensor, labels: torch.Tensor, K: int) -> torch.Tensor:
-    one = torch.ones_like(x)
-    sums = _scatter_sum_batched(x, labels, K)
-    counts = _scatter_sum_batched(one, labels, K).clamp_min(1.0)
+def _initial_codebook_batched(
+    x: torch.Tensor,
+    labels: torch.Tensor,
+    K: int,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if weights is None:
+        weights = torch.ones_like(x)
+    elif weights.ndim == 1:
+        weights = weights.unsqueeze(0).expand_as(x)
+    else:
+        weights = weights.expand_as(x)
+    sums = _scatter_sum_batched(weights * x, labels, K)
+    counts = _scatter_sum_batched(weights, labels, K).clamp_min(torch.finfo(x.dtype).tiny)
     return sums / counts
 
 
@@ -291,7 +301,7 @@ def quantize_rows_dlr_batched(
     x = _continuous_target_batched(w, g, d_A, U_A, alpha, config.beta)
     rho_base = d_A + U_A.square().sum(dim=-1)
     labels = _initialize_labels_batched(x, rho_base, K)
-    codebook = _initial_codebook_batched(x, labels, K)
+    codebook = _initial_codebook_batched(x, labels, K, weights=rho_base)
     if row_lower_bounds is not None and row_upper_bounds is not None:
         codebook = codebook.clamp(
             min=row_lower_bounds.to(device=w.device, dtype=codebook.dtype).unsqueeze(1),

@@ -121,14 +121,23 @@ def initialize_labels_from_target(x: torch.Tensor, d: torch.Tensor, U: torch.Ten
     return labels
 
 
-def initial_placeholder_codebook(x: torch.Tensor, labels: torch.Tensor, K: int) -> torch.Tensor:
+def initial_placeholder_codebook(
+    x: torch.Tensor,
+    labels: torch.Tensor,
+    K: int,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if weights is None:
+        weights = torch.ones_like(x)
     codebook = torch.empty(K, device=x.device, dtype=x.dtype)
+    fallback = (weights * x).sum() / weights.sum().clamp_min(torch.finfo(x.dtype).tiny)
     for k in range(K):
         mask = labels == k
         if mask.any():
-            codebook[k] = x[mask].mean()
+            cluster_weights = weights[mask]
+            codebook[k] = (cluster_weights * x[mask]).sum() / cluster_weights.sum().clamp_min(torch.finfo(x.dtype).tiny)
         else:
-            codebook[k] = x.mean()
+            codebook[k] = fallback
     return codebook
 
 
@@ -292,7 +301,8 @@ def quantize_group_dlr(
     if initial_labels is None:
         x = continuous_dlr_target(w, g, d, U, cfg.beta)
         labels = initialize_labels_from_target(x, d, U, K)
-        codebook = initial_placeholder_codebook(x, labels, K) if initial_codebook is None else initial_codebook.float()
+        rho = d + U.square().sum(dim=-1)
+        codebook = initial_placeholder_codebook(x, labels, K, weights=rho) if initial_codebook is None else initial_codebook.float()
     else:
         labels = initial_labels.long().clone()
         if initial_codebook is None:
