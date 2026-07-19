@@ -182,7 +182,12 @@ def _dequantize_module(indices, lut, device: torch.device, dtype: torch.dtype) -
     return levels[row_ids, group_ids, idx].reshape(rows, -1)
 
 
-def _nan_inf_summary(tensor: torch.Tensor) -> str:
+def _as_tensor(value) -> torch.Tensor:
+    return value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+
+
+def _nan_inf_summary(tensor) -> str:
+    tensor = _as_tensor(tensor)
     finite_mask = torch.isfinite(tensor)
     nan_count = torch.isnan(tensor).sum().item()
     inf_count = torch.isinf(tensor).sum().item()
@@ -202,7 +207,8 @@ def _nan_inf_summary(tensor: torch.Tensor) -> str:
     )
 
 
-def _report_nonfinite(name: str, tensor: torch.Tensor):
+def _report_nonfinite(name: str, tensor):
+    tensor = _as_tensor(tensor)
     if not torch.isfinite(tensor).all():
         print(f"[nonfinite] {name}: {_nan_inf_summary(tensor)}")
 
@@ -505,5 +511,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
