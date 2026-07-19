@@ -45,6 +45,48 @@ def _fit_group_dlr_from_streaming_sketch(diag_total: torch.Tensor, Y: torch.Tens
     return diag_total, Q
 
 
+def _prediction_slice(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 3 and tensor.shape[1] > 1:
+        return tensor[:, :-1, :]
+    return tensor
+
+
+def _iter_activation_chunks(tensor: torch.Tensor, chunk_size: int):
+    flat = tensor.reshape(-1, tensor.shape[-1])
+    if flat.numel() == 0:
+        return
+    chunk_size = max(1, int(chunk_size))
+    for start in range(0, flat.shape[0], chunk_size):
+        yield flat[start : start + chunk_size].float()
+
+
+def _register_alpha_hooks(analyzer, layer_chunk, chunk_start: int, group_meta: dict, stats_chunk_size: int):
+    hooks = []
+
+    def make_hook(meta):
+        def forward_hook(_module, _inp, out):
+            out.retain_grad()
+
+            def grad_hook(grad):
+                delta_sliced = _prediction_slice(grad.detach())
+                flat = delta_sliced.reshape(-1, delta_sliced.shape[-1])
+                if flat.numel() == 0:
+                    return
+                for delta in _iter_activation_chunks(delta_sliced, stats_chunk_size):
+                    meta["alpha_sum"] += delta.square().sum(dim=0).cpu()
+                meta["alpha_count"] += flat.shape[0]
+
+            out.register_hook(grad_hook)
+
+        return forward_hook
+
+    for local_idx, layer in enumerate(layer_chunk):
+        layer_idx = chunk_start + local_idx
+        for module_name, module in analyzer.get_modules(layer).items():
+            hooks.append(module.register_forward_hook(make_hook(group_meta[layer_idx][module_name])))
+    return hooks
+
+
 def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int, dict[str, dict[str, torch.Tensor]]]:
     model = analyzer.model
     model.to(config.device)
@@ -74,6 +116,8 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
                     "omega": [],
                     "diag_total": [],
                     "Y": [],
+                    "alpha_sum": torch.zeros(module.weight.shape[0], dtype=torch.float32),
+                    "alpha_count": 0,
                 }
                 for group_id, _rows in enumerate(groups):
                     seed = 17_000_003 * (layer_idx + 1) + 1_000_003 * (group_id + 1) + 101 * (len(module_name) + 1)
@@ -85,6 +129,8 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
 
         for param in model.parameters():
             param.requires_grad_(param in target_weights)
+
+        alpha_hooks = _register_alpha_hooks(analyzer, layer_chunk, chunk_start, group_meta, config.stats_layer_chunk_size)
 
         # Pass 1: accumulate diagonal and covariance sketch Y = C @ Omega using all rowwise probes.
         model.zero_grad(set_to_none=True)
@@ -241,12 +287,22 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
+                alpha = meta["alpha_sum"] / max(1, meta["alpha_count"])
+                positive_alpha = alpha[alpha > 0]
+                alpha_scale = positive_alpha.median() if positive_alpha.numel() else torch.tensor(1.0)
+                alpha_min = float(1e-6 * alpha_scale)
                 fisher_stats[layer_idx][module_name] = {
                     "group_d": torch.stack(diagonal_list, dim=0),
                     "group_U": torch.stack(lowrank_list, dim=0) if lowrank_list and lowrank_list[0].numel() else torch.zeros(
                         (len(diagonal_list), module.weight.shape[1], 0), dtype=torch.float32
                     ),
+                    "alpha": alpha.cpu(),
+                    "alpha_min": alpha_min,
+                    "alpha_count": int(meta["alpha_count"]),
                 }
+
+        for hook in alpha_hooks:
+            hook.remove()
 
         model.zero_grad(set_to_none=True)
         if torch.cuda.is_available():

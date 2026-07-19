@@ -110,6 +110,55 @@ def _initial_codebook_batched(x: torch.Tensor, labels: torch.Tensor, K: int) -> 
     return sums / counts
 
 
+def _solve_box_qp_row(
+    H: torch.Tensor,
+    f: torch.Tensor,
+    lb: torch.Tensor,
+    ub: torch.Tensor,
+    x0: torch.Tensor,
+    active: torch.Tensor,
+) -> torch.Tensor:
+    x = x0.clamp(min=lb, max=ub)
+    if not active.any():
+        return x
+
+    tol = 1e-9
+    tiny = torch.finfo(H.dtype).tiny
+    for _ in range(int(active.numel()) + 2):
+        at_lower = active & (x <= lb + 1e-10)
+        at_upper = active & (x >= ub - 1e-10)
+        free = active & ~(at_lower | at_upper)
+
+        if free.any():
+            free_ids = torch.nonzero(free, as_tuple=False).flatten()
+            fixed_ids = torch.nonzero(active & ~free, as_tuple=False).flatten()
+            rhs = f.index_select(0, free_ids).clone()
+            if fixed_ids.numel() > 0:
+                rhs = rhs - H.index_select(0, free_ids).index_select(1, fixed_ids) @ x.index_select(0, fixed_ids)
+            H_ff = H.index_select(0, free_ids).index_select(1, free_ids)
+            H_ff = H_ff + torch.eye(free_ids.numel(), device=H.device, dtype=H.dtype) * tiny
+            try:
+                x_free = torch.linalg.solve(H_ff, rhs.unsqueeze(-1)).squeeze(-1)
+            except RuntimeError:
+                x_free = torch.linalg.lstsq(H_ff, rhs.unsqueeze(-1)).solution.squeeze(-1)
+            x[free_ids] = x_free.clamp(min=lb[free_ids], max=ub[free_ids])
+
+        grad = H @ x - f
+        release_lower = at_lower & (grad < -tol)
+        release_upper = at_upper & (grad > tol)
+        if not release_lower.any() and not release_upper.any():
+            break
+        release_ids = torch.cat(
+            (
+                torch.nonzero(release_lower, as_tuple=False).flatten(),
+                torch.nonzero(release_upper, as_tuple=False).flatten(),
+            )
+        )
+        x[release_ids] = x0[release_ids].clamp(min=lb[release_ids], max=ub[release_ids])
+
+    return x
+
+
 def _exact_codebook_update_batched(
     w: torch.Tensor,
     g: torch.Tensor,
@@ -118,6 +167,8 @@ def _exact_codebook_update_batched(
     alpha: torch.Tensor,
     labels: torch.Tensor,
     old_codebook: torch.Tensor,
+    row_lower_bounds: torch.Tensor | None,
+    row_upper_bounds: torch.Tensor | None,
     beta: float,
     K: int,
 ) -> torch.Tensor:
@@ -152,7 +203,29 @@ def _exact_codebook_update_batched(
         eye = torch.eye(U64.shape[-1], device=w.device, dtype=torch.float64).unsqueeze(0).expand(rows, -1, -1)
         h = torch.linalg.solve(eye + Q, v.unsqueeze(-1)).squeeze(-1)
     updated = (b - torch.einsum("bkr,br->bk", M, h)) / A.clamp_min(torch.finfo(A.dtype).tiny)
-    return torch.where(active, updated, old_codebook64).to(dtype=old_codebook.dtype)
+    updated = torch.where(active, updated, old_codebook64)
+    if row_lower_bounds is None or row_upper_bounds is None:
+        return updated.to(dtype=old_codebook.dtype)
+
+    H_lowrank = torch.einsum("bkr,bsr->bks", M, M)
+    lower64 = row_lower_bounds.double().reshape(rows, 1)
+    upper64 = row_upper_bounds.double().reshape(rows, 1)
+    solved = updated.clone()
+    for row_idx in range(rows):
+        active_k = active[row_idx]
+        if not active_k.any():
+            continue
+        H = H_lowrank[row_idx].clone()
+        H.diagonal().add_(A[row_idx])
+        solved[row_idx] = _solve_box_qp_row(
+            H=H,
+            f=b[row_idx],
+            lb=lower64[row_idx].expand(K),
+            ub=upper64[row_idx].expand(K),
+            x0=updated[row_idx],
+            active=active_k,
+        )
+    return torch.where(active, solved, old_codebook64).to(dtype=old_codebook.dtype)
 
 def _sort_codebook_and_remap_batched(codebook: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     sorted_codebook, perm = torch.sort(codebook, dim=1)
@@ -197,6 +270,8 @@ def quantize_rows_dlr_batched(
     alpha: torch.Tensor,
     K: int,
     config: DLRConfig,
+    row_lower_bounds: torch.Tensor | None = None,
+    row_upper_bounds: torch.Tensor | None = None,
 ) -> BatchedDLRResult:
     w = w.float()
     g = g.float()
@@ -216,7 +291,19 @@ def quantize_rows_dlr_batched(
     rho_base = d_A + U_A.square().sum(dim=-1)
     labels = _initialize_labels_batched(x, rho_base, K)
     codebook = _initial_codebook_batched(x, labels, K)
-    codebook = _exact_codebook_update_batched(w, g, d_A, U_A, alpha, labels, codebook, config.beta, K)
+    codebook = _exact_codebook_update_batched(
+        w,
+        g,
+        d_A,
+        U_A,
+        alpha,
+        labels,
+        codebook,
+        row_lower_bounds,
+        row_upper_bounds,
+        config.beta,
+        K,
+    )
     codebook, labels = _sort_codebook_and_remap_batched(codebook, labels)
     old_loss = _batched_loss(w, g, d_A, U_A, alpha, codebook, labels, config.beta)
 
@@ -241,7 +328,17 @@ def quantize_rows_dlr_batched(
             tie_tol=config.tie_tol,
         )
         candidate_codebook = _exact_codebook_update_batched(
-            w, g, d_A, U_A, alpha, candidate_labels, codebook, config.beta, K
+            w,
+            g,
+            d_A,
+            U_A,
+            alpha,
+            candidate_labels,
+            codebook,
+            row_lower_bounds,
+            row_upper_bounds,
+            config.beta,
+            K,
         )
         candidate_codebook, candidate_labels = _sort_codebook_and_remap_batched(candidate_codebook, candidate_labels)
         candidate_loss = _batched_loss(w, g, d_A, U_A, alpha, candidate_codebook, candidate_labels, config.beta)

@@ -25,6 +25,11 @@ HF_TOKEN_ARGS=()
 if [[ -n "${HF_TOKEN:-}" ]]; then
   HF_TOKEN_ARGS=(--hf-token "${HF_TOKEN}")
 fi
+OVERWRITE_GRADIENT_CACHE="${OVERWRITE_GRADIENT_CACHE:-0}"
+GRADIENT_CACHE_ARGS=()
+if [[ "${OVERWRITE_GRADIENT_CACHE}" == "1" ]]; then
+  GRADIENT_CACHE_ARGS=(--overwrite-gradient-cache)
+fi
 STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
 SOLVER_TAG="${STATS_TAG}_beta0_iters0_rtol1em07_lambda1p01_sdmin1em08"
 RUN_TAG="${MODEL_BASENAME}-w3-endloss-dlr-${SOLVER_TAG}"
@@ -56,6 +61,7 @@ python endloss_dlr_quantize.py "${MODEL}" \
   --device cuda \
   --cpu-count 8 \
   --stats-path "${BASE_STATS_PATH}" \
+  "${GRADIENT_CACHE_ARGS[@]}" \
   --quantized-path "${QUANTIZED_PATH}" \
   --output-packed-path "${PACKED_PATH}" \
   --overwrite-quantize \

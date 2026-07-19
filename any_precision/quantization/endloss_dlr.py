@@ -132,6 +132,48 @@ def initial_placeholder_codebook(x: torch.Tensor, labels: torch.Tensor, K: int) 
     return codebook
 
 
+def _solve_box_qp(
+    H: torch.Tensor,
+    f: torch.Tensor,
+    lb: torch.Tensor,
+    ub: torch.Tensor,
+    x0: torch.Tensor,
+    active: torch.Tensor,
+) -> torch.Tensor:
+    x = x0.clamp(min=lb, max=ub)
+    if not active.any():
+        return x
+
+    tol = 1e-9
+    tiny = torch.finfo(H.dtype).tiny
+    for _ in range(int(active.numel()) + 2):
+        at_lower = active & (x <= lb + 1e-10)
+        at_upper = active & (x >= ub - 1e-10)
+        free = active & ~(at_lower | at_upper)
+        if free.any():
+            free_ids = torch.nonzero(free, as_tuple=False).flatten()
+            fixed_ids = torch.nonzero(active & ~free, as_tuple=False).flatten()
+            rhs = f.index_select(0, free_ids).clone()
+            if fixed_ids.numel() > 0:
+                rhs = rhs - H.index_select(0, free_ids).index_select(1, fixed_ids) @ x.index_select(0, fixed_ids)
+            H_ff = H.index_select(0, free_ids).index_select(1, free_ids)
+            H_ff = H_ff + torch.eye(free_ids.numel(), device=H.device, dtype=H.dtype) * tiny
+            try:
+                x_free = torch.linalg.solve(H_ff, rhs.unsqueeze(-1)).squeeze(-1)
+            except RuntimeError:
+                x_free = torch.linalg.lstsq(H_ff, rhs.unsqueeze(-1)).solution.squeeze(-1)
+            x[free_ids] = x_free.clamp(min=lb[free_ids], max=ub[free_ids])
+
+        grad = H @ x - f
+        release_lower = at_lower & (grad < -tol)
+        release_upper = at_upper & (grad > tol)
+        if not release_lower.any() and not release_upper.any():
+            break
+        release_ids = torch.cat((torch.nonzero(release_lower, as_tuple=False).flatten(), torch.nonzero(release_upper, as_tuple=False).flatten()))
+        x[release_ids] = x0[release_ids].clamp(min=lb[release_ids], max=ub[release_ids])
+    return x
+
+
 def exact_dlr_codebook_update(
     w: torch.Tensor,
     g: torch.Tensor,
@@ -141,6 +183,8 @@ def exact_dlr_codebook_update(
     old_codebook: torch.Tensor,
     beta: float,
     K: int,
+    lower_bound: float | None = None,
+    upper_bound: float | None = None,
 ) -> torch.Tensor:
     w64 = w.double()
     g64 = g.double()
@@ -166,13 +210,22 @@ def exact_dlr_codebook_update(
 
     if U64.shape[-1] == 0:
         new_codebook[active] = b_a / A_a.clamp_min(torch.finfo(A_a.dtype).tiny)
+    else:
+        Q = torch.einsum("kr,ks,k->rs", M_a, M_a, 1.0 / A_a)
+        v = (M_a * (b_a / A_a).unsqueeze(-1)).sum(dim=0) - z
+        R = torch.eye(U64.shape[-1], device=U64.device, dtype=U64.dtype) + Q
+        h = torch.linalg.solve(R, v)
+        new_codebook[active] = (b_a - M_a @ h) / A_a
+
+    if lower_bound is None or upper_bound is None:
         return new_codebook.to(dtype=old_codebook.dtype)
 
-    Q = torch.einsum("kr,ks,k->rs", M_a, M_a, 1.0 / A_a)
-    v = (M_a * (b_a / A_a).unsqueeze(-1)).sum(dim=0) - z
-    R = torch.eye(U64.shape[-1], device=U64.device, dtype=U64.dtype) + Q
-    h = torch.linalg.solve(R, v)
-    new_codebook[active] = (b_a - M_a @ h) / A_a
+    H = M @ M.transpose(0, 1)
+    H.diagonal().add_(A)
+    lb = torch.full_like(new_codebook, float(lower_bound))
+    ub = torch.full_like(new_codebook, float(upper_bound))
+    solved = _solve_box_qp(H=H, f=b, lb=lb, ub=ub, x0=new_codebook, active=active)
+    new_codebook[active] = solved[active]
     return new_codebook.to(dtype=old_codebook.dtype)
 
 def sort_codebook_and_remap_labels(codebook: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

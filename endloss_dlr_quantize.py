@@ -81,7 +81,91 @@ def build_fast_stats_config(
         "stats_layer_chunk_size": int(stats_layer_chunk_size),
         "num_output_groups": int(num_output_groups),
         "damping_ratio": float(damping_ratio),
+        "stats_schema_version": 2,
     }
+
+
+def build_gradient_cache_config(
+    n_calib: int,
+    batch_size: int,
+    device: str,
+    gradient_num_examples: int | None,
+    stats_layer_chunk_size: int,
+) -> dict:
+    return {
+        "component": "gradient",
+        "gradient_schema_version": 1,
+        "n_calib": int(n_calib),
+        "batch_size": int(batch_size),
+        "device": str(device),
+        "gradient_num_examples": None if gradient_num_examples is None else int(gradient_num_examples),
+        "stats_layer_chunk_size": int(stats_layer_chunk_size),
+    }
+
+
+def build_fisher_cache_config(
+    rank: int,
+    oversampling: int,
+    n_calib: int,
+    batch_size: int,
+    device: str,
+    fisher_probes: int,
+    stats_layer_chunk_size: int,
+    num_output_groups: int,
+    damping_ratio: float,
+) -> dict:
+    return {
+        "component": "fisher",
+        "fisher_schema_version": 2,
+        "rank": int(rank),
+        "oversampling": int(oversampling),
+        "n_calib": int(n_calib),
+        "batch_size": int(batch_size),
+        "device": str(device),
+        "fisher_probes": int(fisher_probes),
+        "stats_layer_chunk_size": int(stats_layer_chunk_size),
+        "num_output_groups": int(num_output_groups),
+        "damping_ratio": float(damping_ratio),
+    }
+
+
+def _expected_layer_cache_files(folder: Path, num_layers: int) -> list[Path]:
+    return [folder / f"l{i}.pt" for i in range(num_layers)]
+
+
+def _cache_config_matches(folder: Path, config: dict) -> bool:
+    config_path = folder / "_config.pt"
+    if not config_path.exists():
+        return False
+    try:
+        return torch.load(config_path, map_location="cpu") == config
+    except Exception:
+        return False
+
+
+def _cache_is_complete(folder: Path, num_layers: int) -> bool:
+    expected = _expected_layer_cache_files(folder, num_layers)
+    return bool(expected) and all(path.exists() for path in expected)
+
+
+def _clear_layer_cache(folder: Path, num_layers: int) -> None:
+    for path in _expected_layer_cache_files(folder, num_layers):
+        if path.exists():
+            path.unlink()
+    config_path = folder / "_config.pt"
+    if config_path.exists():
+        config_path.unlink()
+
+
+def _save_layer_cache(folder: Path, layer_dicts: list[dict], config: dict) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    for layer_idx, layer_dict in enumerate(layer_dicts):
+        torch.save(layer_dict, folder / f"l{layer_idx}.pt")
+    torch.save(config, folder / "_config.pt")
+
+
+def _load_layer_cache(folder: Path, num_layers: int):
+    return [torch.load(folder / f"l{i}.pt", map_location="cpu") for i in range(num_layers)]
 
 
 def resolve_legacy_fast_stats_cache(
@@ -431,10 +515,13 @@ def collect_endloss_dlr_stats_fast(
     num_output_groups: int,
     damping_ratio: float,
     overwrite: bool,
+    overwrite_gradient_cache: bool = False,
 ) -> None:
     output_path = Path(output_folder)
     output_path.mkdir(parents=True, exist_ok=True)
-    expected = [output_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
+    gradient_cache_path = output_path / "gradients"
+    fisher_cache_path = output_path / "fisher"
+
     stats_config = build_fast_stats_config(
         rank=rank,
         oversampling=oversampling,
@@ -447,75 +534,136 @@ def collect_endloss_dlr_stats_fast(
         num_output_groups=num_output_groups,
         damping_ratio=damping_ratio,
     )
-    config_path = output_path / "_config.pt"
-    config_matches = False
-    if config_path.exists():
-        try:
-            config_matches = torch.load(config_path, map_location="cpu") == stats_config
-        except Exception:
-            config_matches = False
-    cache_complete = bool(expected) and all(path.exists() for path in expected)
-    if not overwrite and cache_complete and config_matches:
+    gradient_config = build_gradient_cache_config(
+        n_calib=n_calib,
+        batch_size=batch_size,
+        device=device,
+        gradient_num_examples=gradient_num_examples,
+        stats_layer_chunk_size=stats_layer_chunk_size,
+    )
+    fisher_component_config = build_fisher_cache_config(
+        rank=rank,
+        oversampling=oversampling,
+        n_calib=n_calib,
+        batch_size=batch_size,
+        device=device,
+        fisher_probes=fisher_probes,
+        stats_layer_chunk_size=stats_layer_chunk_size,
+        num_output_groups=num_output_groups,
+        damping_ratio=damping_ratio,
+    )
+
+    num_layers = analyzer.num_layers
+    combined_complete = _cache_is_complete(output_path, num_layers)
+    combined_matches = _cache_config_matches(output_path, stats_config)
+    gradient_complete = _cache_is_complete(gradient_cache_path, num_layers)
+    gradient_matches = _cache_config_matches(gradient_cache_path, gradient_config)
+    fisher_complete = _cache_is_complete(fisher_cache_path, num_layers)
+    fisher_matches = _cache_config_matches(fisher_cache_path, fisher_component_config)
+
+    if not overwrite and combined_complete and combined_matches:
         logging.info("Cached fast EndLoss_DLR stats found in %s", output_folder)
         return
-    if not overwrite and cache_complete and not config_matches:
-        raise RuntimeError(
-            "Existing EndLoss_DLR stats cache is complete but config metadata mismatches. "
-            f"Refusing to recompute expensive gradients implicitly: {output_folder}. "
-            "Use --overwrite-stats explicitly if recomputation is intended."
-        )
-    if overwrite or not config_matches:
-        for path in expected:
-            if path.exists():
-                path.unlink()
-        if config_path.exists():
-            config_path.unlink()
+
+    if overwrite:
+        logging.info("Overwrite requested; clearing combined, gradient, and Fisher caches under %s", output_folder)
+        _clear_layer_cache(output_path, num_layers)
+        _clear_layer_cache(gradient_cache_path, num_layers)
+        _clear_layer_cache(fisher_cache_path, num_layers)
+        gradient_complete = False
+        gradient_matches = False
+        fisher_complete = False
+        fisher_matches = False
+    else:
+        if overwrite_gradient_cache:
+            logging.info("Gradient overwrite requested; clearing combined stats and gradient cache under %s", output_folder)
+            _clear_layer_cache(output_path, num_layers)
+            _clear_layer_cache(gradient_cache_path, num_layers)
+            gradient_complete = False
+            gradient_matches = False
+        if combined_complete and not combined_matches:
+            logging.info("Combined EndLoss_DLR stats cache config mismatch at %s; rebuilding from reusable component caches where possible.", output_folder)
+            _clear_layer_cache(output_path, num_layers)
+        if gradient_complete and not gradient_matches:
+            logging.info("Gradient cache config mismatch at %s; recomputing gradients only.", gradient_cache_path)
+            _clear_layer_cache(gradient_cache_path, num_layers)
+            gradient_complete = False
+        if fisher_complete and not fisher_matches:
+            logging.info("Fisher cache config mismatch at %s; recomputing Fisher only.", fisher_cache_path)
+            _clear_layer_cache(fisher_cache_path, num_layers)
+            fisher_complete = False
 
     calib_tokens = tokens[: min(n_calib, tokens.shape[0])]
     grad_count = min(calib_tokens.shape[0], gradient_num_examples or calib_tokens.shape[0])
     grad_tokens = calib_tokens[:grad_count]
 
-    logging.info(
-        "Collecting fast EndLoss_DLR stats | grad_examples=%d fisher_probes=%d layer_chunk=%d output_groups=%d",
-        grad_tokens.shape[0],
-        min(fisher_probes, calib_tokens.shape[0]),
-        stats_layer_chunk_size,
-        num_output_groups,
-    )
-    nll_gradients = collect_nll_gradients(
-        analyzer=analyzer,
-        tokens=grad_tokens,
-        batch_size=batch_size,
-        device=device,
-        layer_chunk_size=stats_layer_chunk_size,
-    )
-    fisher_config = SimpleNamespace(
-        device=device,
-        fisher_probes=fisher_probes,
-        rank=rank,
-        oversample=oversampling,
-        num_output_groups=num_output_groups,
-        damping_ratio=damping_ratio,
-        eps=1e-12,
-        calibration_batch_size=batch_size,
-        stats_layer_chunk_size=stats_layer_chunk_size,
-    )
-    fisher_curvature = collect_fisher_curvature(analyzer, calib_tokens, fisher_config)
+    nll_gradients = None
+    if gradient_complete and gradient_matches:
+        logging.info("Reusing cached EndLoss_DLR gradients from %s", gradient_cache_path)
+        nll_gradients = _load_layer_cache(gradient_cache_path, num_layers)
+    else:
+        logging.info(
+            "Collecting fast EndLoss_DLR gradients | grad_examples=%d layer_chunk=%d",
+            grad_tokens.shape[0],
+            stats_layer_chunk_size,
+        )
+        nll_gradients_map = collect_nll_gradients(
+            analyzer=analyzer,
+            tokens=grad_tokens,
+            batch_size=batch_size,
+            device=device,
+            layer_chunk_size=stats_layer_chunk_size,
+        )
+        nll_gradients = [nll_gradients_map[layer_idx] for layer_idx in range(num_layers)]
+        _save_layer_cache(gradient_cache_path, nll_gradients, gradient_config)
 
-    for layer_idx in range(analyzer.num_layers):
+    fisher_curvature = None
+    if fisher_complete and fisher_matches:
+        logging.info("Reusing cached EndLoss_DLR Fisher curvature from %s", fisher_cache_path)
+        fisher_curvature = _load_layer_cache(fisher_cache_path, num_layers)
+    else:
+        logging.info(
+            "Collecting fast EndLoss_DLR Fisher | fisher_probes=%d layer_chunk=%d output_groups=%d",
+            min(fisher_probes, calib_tokens.shape[0]),
+            stats_layer_chunk_size,
+            num_output_groups,
+        )
+        fisher_config = SimpleNamespace(
+            device=device,
+            fisher_probes=fisher_probes,
+            rank=rank,
+            oversample=oversampling,
+            num_output_groups=num_output_groups,
+            damping_ratio=damping_ratio,
+            eps=1e-12,
+            calibration_batch_size=batch_size,
+            stats_layer_chunk_size=stats_layer_chunk_size,
+        )
+        fisher_curvature_map = collect_fisher_curvature(analyzer, calib_tokens, fisher_config)
+        fisher_curvature = [fisher_curvature_map[layer_idx] for layer_idx in range(num_layers)]
+        _save_layer_cache(fisher_cache_path, fisher_curvature, fisher_component_config)
+
+    combined_layers = []
+    for layer_idx in range(num_layers):
         layer_dict = {}
-        for module_name, grad in nll_gradients[layer_idx].items():
-            curvature = fisher_curvature[layer_idx][module_name]
+        layer_gradients = nll_gradients[layer_idx]
+        layer_fisher = fisher_curvature[layer_idx]
+        for module_name, grad in layer_gradients.items():
+            curvature = layer_fisher[module_name]
             layer_dict[module_name] = {
                 "g": grad.cpu(),
                 "group_d": curvature["group_d"].cpu(),
                 "group_U": curvature["group_U"].cpu(),
+                "alpha": curvature["alpha"].cpu(),
+                "alpha_min": float(curvature["alpha_min"]),
                 "num_output_groups": int(curvature["group_d"].shape[0]),
                 "gradient_examples": int(grad_tokens.shape[0]),
                 "fisher_probes": int(min(fisher_probes, calib_tokens.shape[0])),
             }
-        torch.save(layer_dict, output_path / f"l{layer_idx}.pt")
-    torch.save(stats_config, config_path)
+        combined_layers.append(layer_dict)
+
+    _save_layer_cache(output_path, combined_layers, stats_config)
+
 
 def quantize_module_from_scratch(
     W_fp: torch.Tensor,
@@ -537,6 +685,14 @@ def quantize_module_from_scratch(
     stats = EndLossDLRQuantStats(rows_total=out_features)
     row_batch_size = max(1, int(row_batch_size))
 
+    if "alpha" not in module_stats:
+        raise RuntimeError(
+            "Missing row-specific alpha in EndLoss_DLR stats. Recompute stats with the updated fast Fisher pipeline, for example with --overwrite-stats."
+        )
+
+    alpha = module_stats["alpha"].to(device).float()
+    alpha_min = float(module_stats["alpha_min"])
+    alpha = alpha.clamp_min(alpha_min)
     if "group_d" in module_stats:
         group_d = module_stats["group_d"].to(device).float()
         group_U = module_stats["group_U"].to(device).float()
@@ -545,9 +701,6 @@ def quantize_module_from_scratch(
     else:
         d_A = module_stats["d_A"].to(device).float()
         U_A = module_stats["U_A"].to(device).float()
-        alpha = module_stats["alpha"].to(device).float()
-        alpha_min = float(module_stats["alpha_min"])
-        alpha = alpha.clamp_min(alpha_min)
         group_iter = [(None, 0, out_features)]
 
     for group_idx, group_start, group_end in group_iter:
@@ -556,11 +709,12 @@ def quantize_module_from_scratch(
             if group_idx is None:
                 d_cur = d_A
                 U_cur = U_A
-                alpha_cur = alpha[start:end]
             else:
                 d_cur = group_d[group_idx]
                 U_cur = group_U[group_idx]
-                alpha_cur = torch.ones(end - start, device=device, dtype=torch.float32)
+            alpha_cur = alpha[start:end]
+            row_lower_bounds = W_fp[start:end].amin(dim=1)
+            row_upper_bounds = W_fp[start:end].amax(dim=1)
             try:
                 result = quantize_rows_dlr_batched(
                     w=W_fp[start:end],
@@ -570,6 +724,8 @@ def quantize_module_from_scratch(
                     alpha=alpha_cur,
                     K=K,
                     config=config,
+                    row_lower_bounds=row_lower_bounds,
+                    row_upper_bounds=row_upper_bounds,
                 )
             except RuntimeError as exc:
                 retry_config = replace(config, lambda_safety=max(config.lambda_safety * 1.05, 1.05))
@@ -590,6 +746,8 @@ def quantize_module_from_scratch(
                         alpha=alpha_cur,
                         K=K,
                         config=retry_config,
+                        row_lower_bounds=row_lower_bounds,
+                        row_upper_bounds=row_upper_bounds,
                     )
                 except RuntimeError as retry_exc:
                     raise RuntimeError(
@@ -705,6 +863,7 @@ def parse_args():
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--overwrite-tokens", action="store_true")
     parser.add_argument("--overwrite-stats", action="store_true")
+    parser.add_argument("--overwrite-gradient-cache", action="store_true")
     parser.add_argument("--overwrite-quantize", action="store_true")
     parser.add_argument("--overwrite-pack", action="store_true")
     return parser.parse_args()
@@ -802,6 +961,7 @@ def main():
         num_output_groups=args.num_output_groups,
         damping_ratio=args.damping_ratio,
         overwrite=args.overwrite_stats,
+        overwrite_gradient_cache=args.overwrite_gradient_cache,
     )
     if args.stage == "stats":
         return
