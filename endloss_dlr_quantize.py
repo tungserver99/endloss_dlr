@@ -591,6 +591,11 @@ def quantize_module_from_scratch(
                         f"EndLoss_DLR failed after retry at {location}; refusing to fall back to another quantizer."
                     ) from retry_exc
 
+            if not torch.isfinite(result.codebooks).all() or not torch.isfinite(result.losses).all():
+                location = f"layer={layer_idx}, module={module_name}, group={group_idx}, rows=[{start},{end})"
+                max_abs = float(result.codebooks.detach().abs().max().item()) if result.codebooks.numel() else 0.0
+                raise RuntimeError(f"EndLoss_DLR produced non-finite initialization/update at {location}; max_abs_codebook={max_abs:.6e}")
+
             labels_out[start:end, 0] = result.labels.detach().cpu().to(torch.uint8)
             lut_out[start:end, 0] = result.codebooks.detach().cpu().to(torch.float16)
             stats.rows_quantized += end - start
