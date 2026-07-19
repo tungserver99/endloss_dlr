@@ -154,6 +154,23 @@ def main() -> None:
         f"p99_betaG_over_A={_fmt(_quantile(ratio_values, 0.99))}",
     ]))
 
+    print("PER_GROUP_SUMMARY")
+    group_fields = ["group", "rows", "max_abs_x", "max_abs_placeholder_codebook", "max_abs_exact_codebook", "max_abs_betaG_over_A", "min_d", "median_d", "frac_d_near_floor"]
+    print("\t".join(group_fields))
+    for group_idx in sorted({item["group"] for item in rows_out}):
+        group_rows = [item for item in rows_out if item["group"] == group_idx]
+        print("\t".join([
+            str(group_idx),
+            str(len(group_rows)),
+            _fmt(max(float(item["max_abs_x"]) for item in group_rows)),
+            _fmt(max(float(item["max_abs_placeholder_codebook"]) for item in group_rows)),
+            _fmt(max(float(item["max_abs_exact_codebook"]) for item in group_rows)),
+            _fmt(max(float(item["max_abs_betaG_over_A"]) for item in group_rows)),
+            _fmt(min(float(item["min_d"]) for item in group_rows)),
+            _fmt(_quantile(torch.tensor([float(item["median_d"]) for item in group_rows]), 0.50)),
+            _fmt(max(float(item["frac_d_near_floor"]) for item in group_rows)),
+        ]))
+
     print(f"TOP_ROWS_BY_EXACT_CODEBOOK topk={args.topk}")
     fields = [
         "row", "group", "max_abs_w", "max_abs_g", "min_d", "median_d", "max_d", "frac_d_near_floor",
