@@ -208,6 +208,7 @@ def _exact_codebook_update_batched(
         return updated.to(dtype=old_codebook.dtype)
 
     H_lowrank = torch.einsum("bkr,bsr->bks", M, M)
+    f_box = b + torch.einsum("bkr,br->bk", M, z)
     lower64 = row_lower_bounds.double().reshape(rows, 1)
     upper64 = row_upper_bounds.double().reshape(rows, 1)
     solved = updated.clone()
@@ -219,7 +220,7 @@ def _exact_codebook_update_batched(
         H.diagonal().add_(A[row_idx])
         solved[row_idx] = _solve_box_qp_row(
             H=H,
-            f=b[row_idx],
+            f=f_box[row_idx],
             lb=lower64[row_idx].expand(K),
             ub=upper64[row_idx].expand(K),
             x0=updated[row_idx],

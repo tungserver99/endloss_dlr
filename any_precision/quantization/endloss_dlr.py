@@ -222,9 +222,10 @@ def exact_dlr_codebook_update(
 
     H = M @ M.transpose(0, 1)
     H.diagonal().add_(A)
+    f_box = b + M @ z
     lb = torch.full_like(new_codebook, float(lower_bound))
     ub = torch.full_like(new_codebook, float(upper_bound))
-    solved = _solve_box_qp(H=H, f=b, lb=lb, ub=ub, x0=new_codebook, active=active)
+    solved = _solve_box_qp(H=H, f=f_box, lb=lb, ub=ub, x0=new_codebook, active=active)
     new_codebook[active] = solved[active]
     return new_codebook.to(dtype=old_codebook.dtype)
 
