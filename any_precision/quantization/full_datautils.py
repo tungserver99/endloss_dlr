@@ -102,7 +102,7 @@ def _get_red_pajama_from_together_stream(nsamples, seqlen, tokenizer):
 
 def get_wikitext2(nsamples, seqlen, tokenizer, eval_mode=False):
     if not eval_mode:
-        traindata = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
         trainenc = tokenizer("\n\n".join(traindata["text"]), return_tensors="pt")
         trainloader = []
         for _ in range(nsamples):
@@ -112,7 +112,7 @@ def get_wikitext2(nsamples, seqlen, tokenizer, eval_mode=False):
             trainloader.append(inp)
         return trainloader
     else:
-        testdata = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         testenc = tokenizer("\n\n".join(testdata["text"]), return_tensors="pt")
         return testenc
 

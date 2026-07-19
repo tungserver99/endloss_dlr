@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
+source "${SCRIPT_DIR}/load_env.sh"
+
+MODEL="${MODEL:-Qwen/Qwen2.5-7B}"
+BITS="${BITS:-3}"
+SEQ_LEN="${SEQ_LEN:-4096}"
+NUM_EXAMPLES="${NUM_EXAMPLES:-1024}"
+REDPAJAMA_SOURCE="${REDPAJAMA_SOURCE:-raw}"
+REDPAJAMA_DATASET_REPO="${REDPAJAMA_DATASET_REPO:-ZengXiangyu/RedPajama-Data-1T-Sample}"
+FORCE_BASE_REBUILD="${FORCE_BASE_REBUILD:-1}"
+
+MODEL="${MODEL}" \
+BITS="${BITS}" \
+SEQ_LEN="${SEQ_LEN}" \
+NUM_EXAMPLES="${NUM_EXAMPLES}" \
+REDPAJAMA_SOURCE="${REDPAJAMA_SOURCE}" \
+REDPAJAMA_DATASET_REPO="${REDPAJAMA_DATASET_REPO}" \
+FORCE_BASE_REBUILD="${FORCE_BASE_REBUILD}" \
+bash "${SCRIPT_DIR}/run_llama3_3bit_redpajama_4096_1024_squeeze.sh"

@@ -1,13 +1,4 @@
-def _require_hf_datasets():
-    try:
-        from datasets import get_dataset_config_names, load_dataset
-    except ImportError as exc:
-        raise ImportError(
-            "The 'datasets' package is required for raw Hugging Face dataset loading. "
-            "Install it with `pip install datasets` if you want raw calibration/eval datasets."
-        ) from exc
-    return get_dataset_config_names, load_dataset
-
+from datasets import get_dataset_config_names, load_dataset
 import gzip
 import io
 import json
@@ -43,15 +34,13 @@ def _guidedquant_calibration_filename(model_name: str, dataset_name: str, seq_le
 def _get_wikitext2(split):
     assert split in ['train', 'validation', 'test'], f"Unknown split {split} for wikitext2"
 
-    _, load_dataset = _require_hf_datasets()
-    data = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split=split, trust_remote_code=True)
+    data = load_dataset('wikitext', 'wikitext-2-raw-v1', split=split, trust_remote_code=True)
     return data['text']
 
 
 def _get_ptb(split, slice_unk=True):
     assert split in ['train', 'validation', 'test'], f"Unknown split {split} for ptb"
 
-    _, load_dataset = _require_hf_datasets()
     data = load_dataset('ptb_text_only', 'penn_treebank', split=split,
                         trust_remote_code=True)
     data_list = data['sentence']
@@ -65,17 +54,13 @@ def _get_ptb(split, slice_unk=True):
 def _get_c4(split):
     assert split in ['train', 'validation'], f"Unknown split {split} for c4"
 
-    _, load_dataset = _require_hf_datasets()
-
     if split == 'train':
-        _, load_dataset = _require_hf_datasets()
         data = load_dataset(
             'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train',
             trust_remote_code=True
         )
     else:
         assert split == 'validation'
-        _, load_dataset = _require_hf_datasets()
         data = load_dataset(
             'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation',
             trust_remote_code=True
@@ -87,7 +72,6 @@ def _get_c4(split):
 def _get_pileval(split):
     if split != 'validation':
         logging.warning(f"Pileval only has a validation split, but got split={split}. Using validation split.")
-    _, load_dataset = _require_hf_datasets()
     data = load_dataset("mit-han-lab/pile-val-backup", split="validation", trust_remote_code=True)
 
     return data['text']
@@ -95,7 +79,6 @@ def _get_pileval(split):
 
 def _get_redpajama(split):
     assert split in ['train'], "RedPajama only has a train split"
-    get_dataset_config_names, load_dataset = _require_hf_datasets()
     dataset_repo = os.environ.get("REDPAJAMA_DATASET_REPO", DEFAULT_REDPAJAMA_REPO)
     logging.info(f"Loading RedPajama from {dataset_repo}")
     load_errors = []

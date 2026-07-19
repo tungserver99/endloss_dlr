@@ -182,37 +182,6 @@ def _dequantize_module(indices, lut, device: torch.device, dtype: torch.dtype) -
     return levels[row_ids, group_ids, idx].reshape(rows, -1)
 
 
-def _as_tensor(value) -> torch.Tensor:
-    return value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
-
-
-def _nan_inf_summary(tensor) -> str:
-    tensor = _as_tensor(tensor)
-    finite_mask = torch.isfinite(tensor)
-    nan_count = torch.isnan(tensor).sum().item()
-    inf_count = torch.isinf(tensor).sum().item()
-    finite_count = finite_mask.sum().item()
-    if finite_count > 0:
-        finite_values = tensor[finite_mask]
-        min_value = finite_values.min().item()
-        max_value = finite_values.max().item()
-        return (
-            f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
-            f"nan={nan_count} inf={inf_count} finite={finite_count} "
-            f"min={min_value:.6g} max={max_value:.6g}"
-        )
-    return (
-        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
-        f"nan={nan_count} inf={inf_count} finite=0"
-    )
-
-
-def _report_nonfinite(name: str, tensor):
-    tensor = _as_tensor(tensor)
-    if not torch.isfinite(tensor).all():
-        print(f"[nonfinite] {name}: {_nan_inf_summary(tensor)}")
-
-
 @torch.no_grad()
 def _load_sqllm_quantized_model(
     base_model_path: str,
@@ -245,22 +214,18 @@ def _load_sqllm_quantized_model(
 
     for weight_file in tqdm(weight_files, desc="Materializing quantized weights", unit="layer"):
         layer_idx = int(weight_file.stem[1:])
-        layer_weights = torch.load(weight_file, map_location="cpu", weights_only=False)
-        layer_luts = torch.load(lut_dir / weight_file.name, map_location="cpu", weights_only=False)
+        layer_weights = torch.load(weight_file, map_location="cpu")
+        layer_luts = torch.load(lut_dir / weight_file.name, map_location="cpu")
 
         for module_name, indices in layer_weights.items():
             target_module = _resolve_layer_linear_module(analyzer, layer_idx, module_name)
-            lut_tensor = layer_luts[module_name]
-            _report_nonfinite(f"lut layer={layer_idx} module={module_name}", lut_tensor)
             dequantized = _dequantize_module(
                 indices=indices,
-                lut=lut_tensor,
+                lut=layer_luts[module_name],
                 device=target_module.weight.device,
                 dtype=target_module.weight.dtype,
             )
-            _report_nonfinite(f"dequantized layer={layer_idx} module={module_name}", dequantized)
             target_module.weight.data.copy_(dequantized.to(target_module.weight.dtype))
-            _report_nonfinite(f"model_weight layer={layer_idx} module={module_name}", target_module.weight.data)
             del dequantized
 
         del layer_weights, layer_luts
@@ -351,16 +316,6 @@ def evaluate_sliding_window(model, tokenizer, texts, device: str, max_length: in
                 target_chunk[:, :-trg_len] = -100
 
             outputs = model(input_chunk, labels=target_chunk)
-            if not torch.isfinite(outputs.logits).all():
-                print(
-                    f"[nonfinite] logits dataset_window begin={begin_loc} end={end_loc}: "
-                    f"{_nan_inf_summary(outputs.logits)}"
-                )
-            if not torch.isfinite(outputs.loss):
-                print(
-                    f"[nonfinite] loss dataset_window begin={begin_loc} end={end_loc}: "
-                    f"value={outputs.loss.item()}"
-                )
             neg_log_likelihood = outputs.loss * trg_len
             nlls.append(neg_log_likelihood)
             prev_end_loc = end_loc
@@ -390,7 +345,7 @@ def parse_args():
     parser.add_argument("--tokenizer-path", default="", help="Optional tokenizer source; defaults to --model-path")
     parser.add_argument("--datasets", nargs="+", default=["wikitext2", "c4"])
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--dtype", default="float32")
+    parser.add_argument("--dtype", default="float16")
     parser.add_argument("--precision", type=int, default=None, help="Ignored; kept for compatibility with older scripts")
     parser.add_argument("--stride", type=int, default=512)
     parser.add_argument("--max-length", type=int, default=2048)
@@ -511,6 +466,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
