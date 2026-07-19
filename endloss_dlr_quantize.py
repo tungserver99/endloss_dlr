@@ -324,101 +324,6 @@ def _finalize_stats(all_stats, total_pred_tokens: int, rank: int, d_min_scale: f
     return finalized
 
 
-def collect_endloss_dlr_stats(
-    analyzer,
-    tokens: torch.Tensor,
-    output_folder: str,
-    rank: int,
-    oversampling: int,
-    n_calib: int,
-    batch_size: int,
-    stats_chunk_size: int,
-    d_min_scale: float,
-    random_state: int,
-    overwrite: bool,
-) -> None:
-    output_path = Path(output_folder)
-    output_path.mkdir(parents=True, exist_ok=True)
-    expected = [output_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
-    if not overwrite and expected and all(path.exists() for path in expected):
-        logging.info("Cached EndLoss_DLR stats found in %s", output_folder)
-        return
-    if overwrite:
-        for path in expected:
-            if path.exists():
-                path.unlink()
-
-    model, modules_by_layer, original_requires_grad = _prepare_model(analyzer)
-    all_stats = _init_stat_buffers(modules_by_layer, rank, oversampling, seed=random_state)
-
-    hooks = _register_a_pass1_hooks(modules_by_layer, all_stats, stats_chunk_size)
-    total_pred_tokens = 0
-    try:
-        for batch in tqdm(_batch_iter(tokens, batch_size, n_calib), desc="EndLoss_DLR stats pass 1: g and AO"):
-            model.zero_grad(set_to_none=True)
-            batch = batch.to(model.device)
-            logits = model(input_ids=batch, use_cache=False).logits
-            logits = logits[:, :-1, :].float()
-            labels = batch[:, 1:]
-            loss_sum = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), reduction="sum")
-            loss_sum.backward()
-            total_pred_tokens += labels.numel()
-            for layer_idx, modules in enumerate(modules_by_layer):
-                for module_name, module in modules.items():
-                    all_stats[layer_idx][module_name]["g_sum"] += module.weight.grad.detach().float().cpu()
-            del batch, logits, labels, loss_sum
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    finally:
-        _remove_hooks(hooks)
-
-    if total_pred_tokens <= 0:
-        _restore_model(model, original_requires_grad)
-        raise RuntimeError("EndLoss_DLR collected zero prediction tokens.")
-
-    _finish_a_pass1(all_stats, rank, oversampling)
-
-    hooks = _register_a_pass2_hooks(modules_by_layer, all_stats, stats_chunk_size)
-    try:
-        for batch in tqdm(_batch_iter(tokens, batch_size, n_calib), desc="EndLoss_DLR stats pass 2: QTAQ"):
-            batch = batch.to(model.device)
-            with torch.inference_mode():
-                model(input_ids=batch, use_cache=False)
-            del batch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    finally:
-        _remove_hooks(hooks)
-
-    hooks = _register_alpha_hooks(modules_by_layer, all_stats, stats_chunk_size)
-    try:
-        for batch in tqdm(_batch_iter(tokens, batch_size, n_calib), desc="EndLoss_DLR stats pass 3: sampled Fisher alpha"):
-            model.zero_grad(set_to_none=True)
-            batch = batch.to(model.device)
-            logits = model(input_ids=batch, use_cache=False).logits[:, :-1, :].float()
-            probs = torch.softmax(logits, dim=-1)
-            pseudo_labels = torch.multinomial(probs.reshape(-1, probs.shape[-1]), num_samples=1).squeeze(-1)
-            pseudo_loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), pseudo_labels, reduction="sum")
-            pseudo_loss.backward()
-            del batch, logits, probs, pseudo_labels, pseudo_loss
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    finally:
-        _remove_hooks(hooks)
-
-    finalized = _finalize_stats(all_stats, total_pred_tokens, rank, d_min_scale)
-    for layer_idx, layer_dict in enumerate(finalized):
-        torch.save(layer_dict, output_path / f"l{layer_idx}.pt")
-
-    _restore_model(model, original_requires_grad)
-
-
-
-def _row_group_ranges(out_features: int, requested_groups: int) -> list[tuple[int, int]]:
-    groups = min(max(1, int(requested_groups)), int(out_features))
-    chunk = (out_features + groups - 1) // groups
-    return [(start, min(start + chunk, out_features)) for start in range(0, out_features, chunk)]
-
 def collect_endloss_dlr_stats_fast(
     analyzer,
     tokens: torch.Tensor,
@@ -438,13 +343,37 @@ def collect_endloss_dlr_stats_fast(
     output_path = Path(output_folder)
     output_path.mkdir(parents=True, exist_ok=True)
     expected = [output_path / f"l{i}.pt" for i in range(analyzer.num_layers)]
-    if not overwrite and expected and all(path.exists() for path in expected):
+    stats_config = {
+        "stats_method": "fast_weight_gradient_fisher_v2",
+        "rank": int(rank),
+        "oversampling": int(oversampling),
+        "n_calib": int(n_calib),
+        "batch_size": int(batch_size),
+        "device": str(device),
+        "fisher_probes": int(fisher_probes),
+        "gradient_num_examples": None if gradient_num_examples is None else int(gradient_num_examples),
+        "stats_layer_chunk_size": int(stats_layer_chunk_size),
+        "num_output_groups": int(num_output_groups),
+        "damping_ratio": float(damping_ratio),
+    }
+    config_path = output_path / "_config.pt"
+    config_matches = False
+    if config_path.exists():
+        try:
+            config_matches = torch.load(config_path, map_location="cpu") == stats_config
+        except Exception:
+            config_matches = False
+    if not overwrite and expected and all(path.exists() for path in expected) and config_matches:
         logging.info("Cached fast EndLoss_DLR stats found in %s", output_folder)
         return
-    if overwrite:
+    if not overwrite and expected and all(path.exists() for path in expected) and not config_matches:
+        logging.warning("Existing EndLoss_DLR stats cache config mismatch or missing metadata; recomputing: %s", output_folder)
+    if overwrite or not config_matches:
         for path in expected:
             if path.exists():
                 path.unlink()
+        if config_path.exists():
+            config_path.unlink()
 
     calib_tokens = tokens[: min(n_calib, tokens.shape[0])]
     grad_count = min(calib_tokens.shape[0], gradient_num_examples or calib_tokens.shape[0])
@@ -490,6 +419,7 @@ def collect_endloss_dlr_stats_fast(
                 "fisher_probes": int(min(fisher_probes, calib_tokens.shape[0])),
             }
         torch.save(layer_dict, output_path / f"l{layer_idx}.pt")
+    torch.save(stats_config, config_path)
 
 def quantize_module_from_scratch(
     W_fp: torch.Tensor,
@@ -687,7 +617,8 @@ def main():
     model_name = args.model.rstrip("/").split("/")[-1]
     data_tag = f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
     stats_tag = (
-        f"{data_tag}_r{args.rank}_os{args.oversampling}_ncalib{args.n_calib}"
+        f"fastwgf_v2_{data_tag}_r{args.rank}_os{args.oversampling}"
+        f"_ncalib{args.n_calib}_bs{args.batch_size}"
         f"_fprobe{args.fisher_probes}_gex{args.gradient_num_examples or args.n_calib}"
         f"_lchunk{args.stats_layer_chunk_size}_og{args.num_output_groups}"
         f"_damp{_tag_value(args.damping_ratio)}_seed{args.random_state}"

@@ -28,6 +28,5 @@ python endloss_dlr_quantize.py "meta-llama/Llama-2-7b-hf" \
   --lambda-safety 1.01 \
   --device cuda \
   --cpu-count 8 \
-  --overwrite-stats \
   --overwrite-quantize \
   --overwrite-pack
