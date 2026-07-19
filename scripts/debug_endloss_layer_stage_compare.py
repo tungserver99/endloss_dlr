@@ -52,11 +52,25 @@ def _print_stage(stage: str, fp: torch.Tensor, q: torch.Tensor, topk: int) -> No
         print(f"{idx}\t{float(fp_vec[idx].item()):.6e}\t{float(q_vec[idx].item()):.6e}\t{float(delta[idx].item()):.6e}\t{float(val):.6e}")
 
 
-def _run_manual_layer(layer, hidden: torch.Tensor):
+def _causal_mask(hidden: torch.Tensor) -> torch.Tensor:
+    seq_len = hidden.shape[1]
+    min_value = torch.finfo(hidden.dtype).min
+    mask = torch.full((seq_len, seq_len), min_value, dtype=hidden.dtype, device=hidden.device)
+    mask = torch.triu(mask, diagonal=1)
+    return mask[None, None, :, :]
+
+
+def _run_manual_layer(layer, hidden: torch.Tensor, position_ids: torch.Tensor, position_embeddings):
     layer_input = hidden
     residual = hidden
     normed_attn = layer.input_layernorm(hidden)
-    attn_out = layer.self_attn(normed_attn, use_cache=False)[0]
+    attn_out = layer.self_attn(
+        normed_attn,
+        attention_mask=_causal_mask(hidden),
+        position_ids=position_ids,
+        position_embeddings=position_embeddings,
+        use_cache=False,
+    )[0]
     after_attn = residual + attn_out
     residual = after_attn
     normed_mlp = layer.post_attention_layernorm(after_attn)
@@ -118,8 +132,11 @@ def main() -> None:
         embeds = fp_model.model.embed_tokens(input_ids)
         fp_hidden = embeds
         q_hidden = q_model.model.embed_tokens(input_ids)
-        fp_states = _run_manual_layer(fp_model.model.layers[args.layer], fp_hidden)
-        q_states = _run_manual_layer(q_model.model.layers[args.layer], q_hidden)
+        position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+        fp_position_embeddings = fp_model.model.rotary_emb(fp_hidden, position_ids)
+        q_position_embeddings = q_model.model.rotary_emb(q_hidden, position_ids)
+        fp_states = _run_manual_layer(fp_model.model.layers[args.layer], fp_hidden, position_ids, fp_position_embeddings)
+        q_states = _run_manual_layer(q_model.model.layers[args.layer], q_hidden, position_ids, q_position_embeddings)
 
     tok = args.token
     print(f"window={args.window} token={tok} absolute_token={begin + tok} layer={args.layer} dtype={dtype}")
