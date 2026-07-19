@@ -6,7 +6,6 @@ from pathlib import Path
 import sys
 
 import torch
-from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
@@ -14,7 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from scripts.eval_nonuquant_style_ppl import _load_sqllm_quantized_model
+from scripts.eval_nonuquant_style_ppl import _load_sqllm_quantized_model, _load_wikitext2
 from env_utils import load_project_dotenv
 
 
@@ -65,8 +64,8 @@ def main() -> None:
     model = _load_sqllm_quantized_model(args.model_path, args.quantized_path, args.device, dtype, token)
     model.eval()
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test", token=token)
-    text = "\n\n".join(dataset["text"])
+    texts = _load_wikitext2(ROOT_DIR / "dataset_cache", seed=42, token=token)
+    text = "\n\n".join(texts)
     input_ids_all = tokenizer(text, return_tensors="pt").input_ids
     seq_len = int(input_ids_all.shape[1])
     total_windows = (seq_len + args.stride - 1) // args.stride
