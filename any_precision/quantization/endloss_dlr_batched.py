@@ -300,8 +300,9 @@ def quantize_rows_dlr_batched(
 
     x = _continuous_target_batched(w, g, d_A, U_A, alpha, config.beta)
     rho_base = d_A + U_A.square().sum(dim=-1)
-    labels = _initialize_labels_batched(x, rho_base, K)
-    codebook = _initial_codebook_batched(x, labels, K, weights=rho_base)
+    init_weights = torch.ones_like(rho_base) if config.max_outer_iters == 0 else rho_base
+    labels = _initialize_labels_batched(x, init_weights, K)
+    codebook = _initial_codebook_batched(x, labels, K, weights=init_weights)
     if row_lower_bounds is not None and row_upper_bounds is not None:
         codebook = codebook.clamp(
             min=row_lower_bounds.to(device=w.device, dtype=codebook.dtype).unsqueeze(1),

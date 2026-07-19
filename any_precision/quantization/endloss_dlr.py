@@ -300,9 +300,9 @@ def quantize_group_dlr(
 
     if initial_labels is None:
         x = continuous_dlr_target(w, g, d, U, cfg.beta)
-        labels = initialize_labels_from_target(x, d, U, K)
-        rho = d + U.square().sum(dim=-1)
-        codebook = initial_placeholder_codebook(x, labels, K, weights=rho) if initial_codebook is None else initial_codebook.float()
+        init_weights = torch.ones_like(d) if cfg.max_outer_iters == 0 else d + U.square().sum(dim=-1)
+        labels = initialize_labels_from_target(x, init_weights, x.new_zeros((x.numel(), 0)), K)
+        codebook = initial_placeholder_codebook(x, labels, K, weights=init_weights) if initial_codebook is None else initial_codebook.float()
     else:
         labels = initial_labels.long().clone()
         if initial_codebook is None:
