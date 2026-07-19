@@ -292,6 +292,16 @@ def quantize_rows_dlr_batched(
     rho_base = d_A + U_A.square().sum(dim=-1)
     labels = _initialize_labels_batched(x, rho_base, K)
     codebook = _initial_codebook_batched(x, labels, K)
+    if row_lower_bounds is not None and row_upper_bounds is not None:
+        codebook = codebook.clamp(
+            min=row_lower_bounds.to(device=w.device, dtype=codebook.dtype).unsqueeze(1),
+            max=row_upper_bounds.to(device=w.device, dtype=codebook.dtype).unsqueeze(1),
+        )
+    codebook, labels = _sort_codebook_and_remap_batched(codebook, labels)
+    if config.max_outer_iters == 0:
+        init_loss = _batched_loss(w, g, d_A, U_A, alpha, codebook, labels, config.beta)
+        return BatchedDLRResult(labels=labels, codebooks=codebook, losses=init_loss, fallback_rows=0)
+
     codebook = _exact_codebook_update_batched(
         w,
         g,

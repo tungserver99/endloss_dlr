@@ -300,6 +300,11 @@ def quantize_group_dlr(
         else:
             codebook = initial_codebook.float().clone()
 
+    codebook, labels = sort_codebook_and_remap_labels(codebook, labels)
+    if cfg.max_outer_iters == 0:
+        init_loss = dlr_loss(w, g, d, U, codebook, labels, cfg.beta)
+        return codebook, labels, init_loss
+
     codebook = exact_dlr_codebook_update(
         w=w,
         g=g,
