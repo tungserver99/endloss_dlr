@@ -25,31 +25,23 @@ HF_TOKEN_ARGS=()
 if [[ -n "${HF_TOKEN:-}" ]]; then
   HF_TOKEN_ARGS=(--hf-token "${HF_TOKEN}")
 fi
-OVERWRITE_GRADIENT_CACHE="${OVERWRITE_GRADIENT_CACHE:-0}"
+# This init-only script must reuse cached EndLoss_DLR gradients/Fisher.
+# Ignore any inherited OVERWRITE_GRADIENT_CACHE=1 from the shell.
+OVERWRITE_GRADIENT_CACHE=0
 GRADIENT_CACHE_ARGS=()
-if [[ "${OVERWRITE_GRADIENT_CACHE}" == "1" ]]; then
-  GRADIENT_CACHE_ARGS=(--overwrite-gradient-cache)
-fi
-CURVATURE_SOURCE="${CURVATURE_SOURCE:-sqllm}"
+CURVATURE_SOURCE="${CURVATURE_SOURCE:-fast}"
 SQUEEZE_GRADIENT_PATH="${SQUEEZE_GRADIENT_PATH:-cache/gradients/${DATA_TAG}.pt}"
 CURVATURE_ARGS=(--curvature-source "${CURVATURE_SOURCE}")
 if [[ "${CURVATURE_SOURCE}" == "sqllm" ]]; then
   CURVATURE_ARGS+=(--squeeze-gradient-path "${SQUEEZE_GRADIENT_PATH}")
   if [[ ! -f "${SQUEEZE_GRADIENT_PATH}" ]]; then
-    echo "Missing SqueezeLLM gradient cache: ${SQUEEZE_GRADIENT_PATH}"
-    echo "Building it inside this script..."
-    python quantize.py "${MODEL}" \
-      --seed_precision 3 \
-      --parent_precision 3 \
-      --mode gradients \
-      --dataset redpajama \
-      --seq_len 4096 \
-      --num_examples 1024 \
-      --redpajama_source cache \
-      --cpu_count 8
-  else
-    echo "Reusing SqueezeLLM gradient cache: ${SQUEEZE_GRADIENT_PATH}"
+    echo "Missing SqueezeLLM gradient cache: ${SQUEEZE_GRADIENT_PATH}" >&2
+    echo "Set CURVATURE_SOURCE=fast to reuse the existing EndLoss_DLR gradient/Fisher cache." >&2
+    exit 1
   fi
+  echo "Reusing SqueezeLLM gradient cache as Fisher: ${SQUEEZE_GRADIENT_PATH}"
+else
+  echo "Reusing EndLoss_DLR stats cache: ${BASE_STATS_PATH}"
 fi
 STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
 SOLVER_TAG="${STATS_TAG}_curv${CURVATURE_SOURCE}_beta0_iters0_rtol1em07_lambda1p01_sdmin1em08"
