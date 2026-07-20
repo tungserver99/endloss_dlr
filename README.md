@@ -148,6 +148,18 @@ bash scripts/download_calibration.sh
 ```
 
 
+## Method A: constrained end-loss scalar quantization
+
+Method A keeps the existing model/data/packing pipeline, uses the repository's SqueezeLLM quantizer for `q0`, collects separate dense grouped NLL and KL curvatures, and solves assignments with Parallel MM.
+
+```bash
+python method_a_quantize.py $MODEL_NAME --bits $BITS --num-output-groups $NUM_GROUPS --stage all
+# 40 GB single-GPU baseline:
+python method_a_quantize.py meta-llama/Llama-2-7b-hf --bits 3 --batch-size 1 --stats-layer-chunk-size 1 --num-output-groups 4
+```
+
+Stages can be resumed independently with `--stage tokens|stats|init|quantize|pack`. The signed NLL gradient is collected layer-wise; `--kl-probes` controls Monte Carlo teacher-score Fisher probes and defaults to 1.
+
 ## Weight-only scalar quantization (SqueezeLLM, LNQ + GuidedQuant)
 Below command saves the weight gradients and activation gradients (averaged into $NUM_GROUPS groups) and quantizes model with SqueezeLLM.
 ```bash

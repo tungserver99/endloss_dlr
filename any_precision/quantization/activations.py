@@ -8,7 +8,10 @@ from any_precision.analyzer.analyzer import ModelAnalyzer
 from typing import List, Tuple, Sequence, Dict
 from itertools import chain
 from tqdm import tqdm
-from transformers import Gemma3Config
+try:
+    from transformers import Gemma3Config
+except ImportError:
+    Gemma3Config = ()
 
 
 def compact_logging_enabled() -> bool:

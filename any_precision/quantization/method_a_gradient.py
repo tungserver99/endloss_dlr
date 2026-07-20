@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import hashlib
 import sys
 
 import torch
@@ -9,19 +10,40 @@ from tqdm.auto import tqdm
 
 
 def _enable_checkpointing_for_stats(model):
+    model._method_a_checkpointing_was_enabled = bool(
+        getattr(model, "is_gradient_checkpointing", False)
+    )
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model._method_a_original_use_cache = model.config.use_cache
+        model.config.use_cache = False
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
-    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-        model.config.use_cache = False
-    if hasattr(model, "enable_input_require_grads"):
+    model._method_a_input_grads_were_enabled = hasattr(model, "_require_grads_hook")
+    if (
+        hasattr(model, "enable_input_require_grads")
+        and not model._method_a_input_grads_were_enabled
+    ):
         model.enable_input_require_grads()
 
 
 def _disable_checkpointing_for_stats(model):
-    if hasattr(model, "gradient_checkpointing_disable"):
+    if (
+        hasattr(model, "gradient_checkpointing_disable")
+        and not getattr(model, "_method_a_checkpointing_was_enabled", False)
+    ):
         model.gradient_checkpointing_disable()
-    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-        model.config.use_cache = True
+    if hasattr(model, "_method_a_checkpointing_was_enabled"):
+        del model._method_a_checkpointing_was_enabled
+    if (
+        hasattr(model, "disable_input_require_grads")
+        and not getattr(model, "_method_a_input_grads_were_enabled", False)
+    ):
+        model.disable_input_require_grads()
+    if hasattr(model, "_method_a_input_grads_were_enabled"):
+        del model._method_a_input_grads_were_enabled
+    if hasattr(model, "config") and hasattr(model, "_method_a_original_use_cache"):
+        model.config.use_cache = model._method_a_original_use_cache
+        del model._method_a_original_use_cache
 
 
 def _snapshot_float_dtypes(model):
@@ -56,6 +78,16 @@ def _restore_float_dtypes(model, param_dtypes, buffer_dtypes):
 def _iter_layer_chunks(layers, chunk_size: int):
     for start in range(0, len(layers), chunk_size):
         yield start, layers[start:start + chunk_size]
+
+
+def tensor_fingerprint(tensor: torch.Tensor) -> str:
+    array = tensor.detach().cpu().contiguous().numpy()
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def model_identity(analyzer) -> str:
+    config = getattr(analyzer.model, "config", None)
+    return str(getattr(config, "_name_or_path", analyzer.model.__class__.__name__))
 
 
 def _progress_kwargs() -> dict:
