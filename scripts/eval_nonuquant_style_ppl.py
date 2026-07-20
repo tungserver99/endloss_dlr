@@ -318,6 +318,21 @@ def evaluate_sliding_window(model, tokenizer, texts, device: str, max_length: in
                 target_chunk[:, :-trg_len] = -100
 
             outputs = model(input_chunk, labels=target_chunk)
+            if not torch.isfinite(outputs.logits).all():
+                finite_logits = outputs.logits[torch.isfinite(outputs.logits)]
+                max_abs = float(finite_logits.abs().max().item()) if finite_logits.numel() else float("nan")
+                raise RuntimeError(
+                    "Non-finite logits during PPL evaluation "
+                    f"begin={begin_loc} end={end_loc} trg_len={trg_len} max_abs_finite_logits={max_abs:.6e}"
+                )
+            if not torch.isfinite(outputs.loss):
+                finite_logits = outputs.logits[torch.isfinite(outputs.logits)]
+                max_abs = float(finite_logits.abs().max().item()) if finite_logits.numel() else float("nan")
+                raise RuntimeError(
+                    "Non-finite loss during PPL evaluation "
+                    f"begin={begin_loc} end={end_loc} trg_len={trg_len} loss={float(outputs.loss.item())} "
+                    f"max_abs_finite_logits={max_abs:.6e}"
+                )
             neg_log_likelihood = outputs.loss * trg_len
             nlls.append(neg_log_likelihood)
             prev_end_loc = end_loc

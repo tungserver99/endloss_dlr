@@ -120,6 +120,32 @@ def _initial_codebook_batched(
     return sums / counts
 
 
+def _lloyd_init_batched(
+    x: torch.Tensor,
+    labels: torch.Tensor,
+    codebook: torch.Tensor,
+    K: int,
+    weights: torch.Tensor | None = None,
+    max_iters: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if weights is None:
+        weights = torch.ones_like(x)
+    elif weights.ndim == 1:
+        weights = weights.unsqueeze(0).expand_as(x)
+    else:
+        weights = weights.expand_as(x)
+
+    for _ in range(max(0, int(max_iters))):
+        old_labels = labels
+        dist = (x.unsqueeze(-1) - codebook.unsqueeze(1)).square()
+        labels = dist.argmin(dim=-1)
+        codebook = _initial_codebook_batched(x, labels, K, weights=weights)
+        codebook, labels = _sort_codebook_and_remap_batched(codebook, labels)
+        if torch.equal(labels, old_labels):
+            break
+    return codebook, labels
+
+
 def _solve_box_qp_row(
     H: torch.Tensor,
     f: torch.Tensor,
@@ -303,6 +329,8 @@ def quantize_rows_dlr_batched(
     init_weights = torch.ones_like(rho_base) if config.max_outer_iters == 0 else rho_base
     labels = _initialize_labels_batched(x, init_weights, K)
     codebook = _initial_codebook_batched(x, labels, K, weights=init_weights)
+    if config.max_outer_iters == 0:
+        codebook, labels = _lloyd_init_batched(x, labels, codebook, K, weights=init_weights, max_iters=8)
     if row_lower_bounds is not None and row_upper_bounds is not None:
         codebook = codebook.clamp(
             min=row_lower_bounds.to(device=w.device, dtype=codebook.dtype).unsqueeze(1),

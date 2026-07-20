@@ -141,6 +141,26 @@ def initial_placeholder_codebook(
     return codebook
 
 
+def lloyd_initialize_codebook(
+    x: torch.Tensor,
+    labels: torch.Tensor,
+    codebook: torch.Tensor,
+    K: int,
+    weights: torch.Tensor | None = None,
+    max_iters: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if weights is None:
+        weights = torch.ones_like(x)
+    for _ in range(max(0, int(max_iters))):
+        old_labels = labels
+        labels = (x.unsqueeze(-1) - codebook.unsqueeze(0)).square().argmin(dim=-1)
+        codebook = initial_placeholder_codebook(x, labels, K, weights=weights)
+        codebook, labels = sort_codebook_and_remap_labels(codebook, labels)
+        if torch.equal(labels, old_labels):
+            break
+    return codebook, labels
+
+
 def _solve_box_qp(
     H: torch.Tensor,
     f: torch.Tensor,
@@ -303,6 +323,8 @@ def quantize_group_dlr(
         init_weights = torch.ones_like(d) if cfg.max_outer_iters == 0 else d + U.square().sum(dim=-1)
         labels = initialize_labels_from_target(x, init_weights, x.new_zeros((x.numel(), 0)), K)
         codebook = initial_placeholder_codebook(x, labels, K, weights=init_weights) if initial_codebook is None else initial_codebook.float()
+        if cfg.max_outer_iters == 0:
+            codebook, labels = lloyd_initialize_codebook(x, labels, codebook, K, weights=init_weights, max_iters=8)
     else:
         labels = initial_labels.long().clone()
         if initial_codebook is None:
