@@ -115,6 +115,7 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
                     "groups": groups,
                     "omega": [],
                     "diag_total": [],
+                    "row_diag_total": torch.zeros_like(module.weight, dtype=torch.float32, device="cpu"),
                     "Y": [],
                     "alpha_sum": torch.zeros(module.weight.shape[0], dtype=torch.float32),
                     "alpha_count": 0,
@@ -159,6 +160,7 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
                 for module_name, module in analyzer.get_modules(layer).items():
                     grad_probe = module.weight.grad.detach().float() * batch_scale
                     meta = group_meta[layer_idx][module_name]
+                    meta["row_diag_total"].add_(grad_probe.square().cpu())
                     for group_id, rows in enumerate(meta["groups"]):
                         P = grad_probe.index_select(0, rows) / (max(1, rows.numel()) ** 0.5)
                         meta["diag_total"][group_id].add_(P.square().sum(dim=0).cpu())
@@ -177,6 +179,7 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
             layer_idx = chunk_start + local_idx
             for module_name, module in analyzer.get_modules(layer).items():
                 meta = group_meta[layer_idx][module_name]
+                meta["row_diag_total"].div_(num_probe_batches)
                 for group_id, _rows in enumerate(meta["groups"]):
                     meta["diag_total"][group_id].div_(num_probe_batches)
                     meta["Y"][group_id].div_(num_probe_batches)
@@ -255,14 +258,18 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
             layer_idx = chunk_start + local_idx
             for module_name, module in analyzer.get_modules(layer).items():
                 meta = group_meta[layer_idx][module_name]
+                row_diag_total = meta["row_diag_total"]
+                row_damping = config.damping_ratio * row_diag_total.mean().clamp_min(config.eps)
+                row_diag = row_diag_total + row_damping
                 diagonal_list = []
                 lowrank_list = []
                 for group_id, _rows in enumerate(meta["groups"]):
                     diag_total = meta["diag_total"][group_id].to(config.device, non_blocking=True)
                     Q = meta["Q"][group_id].to(config.device, non_blocking=True)
+                    damping = config.damping_ratio * diag_total.mean().clamp_min(config.eps)
+                    fisher_diag = diag_total + damping
                     if config.rank <= 0 or Q.shape[1] == 0:
-                        damping = config.damping_ratio * diag_total.mean().clamp_min(config.eps)
-                        diagonal = diag_total + damping
+                        diagonal = fisher_diag
                         lowrank = torch.zeros((diag_total.numel(), 0), device=config.device, dtype=torch.float32)
                     else:
                         small_cov = meta["small_cov"][group_id].to(config.device, non_blocking=True)
@@ -278,12 +285,11 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
                             kept_vecs = eigvecs[:, :kept]
                             lowrank = Q.matmul(kept_vecs * kept_vals.sqrt().unsqueeze(0))
                         residual_diag = (diag_total - lowrank.square().sum(dim=1)).clamp_min(0.0)
-                        damping = config.damping_ratio * diag_total.mean().clamp_min(config.eps)
                         diagonal = residual_diag + damping
                         del small_cov, eigvals, eigvecs, order
                     diagonal_list.append(diagonal.cpu())
                     lowrank_list.append(lowrank.cpu())
-                    del diag_total, Q, diagonal, lowrank
+                    del diag_total, Q, fisher_diag, diagonal, lowrank
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
@@ -292,6 +298,7 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
                 alpha_scale = positive_alpha.median() if positive_alpha.numel() else torch.tensor(1.0)
                 alpha_min = float(1e-6 * alpha_scale)
                 fisher_stats[layer_idx][module_name] = {
+                    "row_diag": row_diag.cpu(),
                     "group_d": torch.stack(diagonal_list, dim=0),
                     "group_U": torch.stack(lowrank_list, dim=0) if lowrank_list and lowrank_list[0].numel() else torch.zeros(
                         (len(diagonal_list), module.weight.shape[1], 0), dtype=torch.float32
@@ -319,5 +326,96 @@ def collect_fisher_curvature(analyzer, tokens: torch.Tensor, config) -> dict[int
     return fisher_stats
 
 
+def collect_sqllm_style_fisher_diagonal(
+    analyzer,
+    tokens: torch.Tensor,
+    batch_size: int,
+    device: str,
+    layer_chunk_size: int = 8,
+) -> dict[int, dict[str, dict[str, torch.Tensor]]]:
+    """Collect per-row diagonal Fisher with the same loss/hook semantics as SQ/SqueezeLLM.
 
+    SqueezeLLM registers a weight hook that replaces each backward gradient by
+    grad.pow(2), then lets PyTorch accumulate module.weight.grad over calibration
+    sequences. We do the same, but only enable a chunk of layers at a time to avoid
+    the all-layer gradient memory spike.
+    """
+    model = analyzer.model
+    model.to(device)
+    model.eval()
+    original_param_dtypes, original_buffer_dtypes = _snapshot_float_dtypes(model)
+    model = model.bfloat16()
+    _enable_checkpointing_for_stats(model)
+
+    layers = analyzer.get_layers()
+    fisher_stats: dict[int, dict[str, dict[str, torch.Tensor]]] = defaultdict(dict)
+    original_requires_grad = {id(param): param.requires_grad for param in model.parameters()}
+
+    def square_grad_hook(grad):
+        return grad.pow(2)
+
+    for chunk_start, layer_chunk in _iter_layer_chunks(layers, layer_chunk_size):
+        target_weights = set()
+        for layer in layer_chunk:
+            for module in analyzer.get_modules(layer).values():
+                target_weights.add(module.weight)
+
+        for param in model.parameters():
+            param.requires_grad_(param in target_weights)
+
+        weight_hooks = []
+        for layer in layer_chunk:
+            for module in analyzer.get_modules(layer).values():
+                weight_hooks.append(module.weight.register_hook(square_grad_hook))
+
+        model.zero_grad(set_to_none=True)
+        for start in tqdm(
+            range(0, tokens.shape[0], batch_size),
+            desc=f"Collecting SQ-style Fisher diagonal L{chunk_start}-{chunk_start + len(layer_chunk) - 1}",
+            ascii=True,
+            leave=False,
+            dynamic_ncols=False,
+            ncols=100,
+            mininterval=5.0,
+            maxinterval=30.0,
+            file=sys.stdout,
+        ):
+            batch = tokens[start:start + batch_size].to(model.device)
+            outputs = model(input_ids=batch, labels=batch)
+            outputs.loss.backward()
+            del outputs, batch
+
+        for hook in weight_hooks:
+            hook.remove()
+
+        for local_idx, layer in enumerate(layer_chunk):
+            layer_idx = chunk_start + local_idx
+            for module_name, module in analyzer.get_modules(layer).items():
+                row_diag = module.weight.grad
+                if row_diag is None:
+                    raise RuntimeError(f"Missing SQ-style Fisher diagonal for layer {layer_idx} module {module_name}")
+                row_diag = row_diag.detach().float().cpu()
+                out_features, in_features = row_diag.shape
+                fisher_stats[layer_idx][module_name] = {
+                    "row_diag": row_diag,
+                    "group_d": row_diag.mean(dim=0, keepdim=True),
+                    "group_U": torch.zeros((1, in_features, 0), dtype=torch.float32),
+                    "alpha": torch.ones(out_features, dtype=torch.float32),
+                    "alpha_min": 1e-6,
+                    "alpha_count": int(tokens.shape[0]),
+                }
+
+        model.zero_grad(set_to_none=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    for param in model.parameters():
+        param.requires_grad_(original_requires_grad[id(param)])
+
+    _restore_float_dtypes(model, original_param_dtypes, original_buffer_dtypes)
+    _disable_checkpointing_for_stats(model)
+    model.eval()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return fisher_stats
 

@@ -35,7 +35,7 @@ from any_precision.analyzer import dispatch_model, get_analyzer
 from any_precision.quantization.endloss_dlr import DLRConfig
 from any_precision.quantization.endloss_dlr_batched import quantize_rows_dlr_batched
 from any_precision.quantization.endloss_dlr_fast_nll import collect_nll_gradients
-from any_precision.quantization.endloss_dlr_fast_fisher import collect_fisher_curvature
+from any_precision.quantization.endloss_dlr_fast_fisher import collect_fisher_curvature, collect_sqllm_style_fisher_diagonal
 from any_precision.quantization.pack import pack
 
 
@@ -68,6 +68,7 @@ def build_fast_stats_config(
     stats_layer_chunk_size: int,
     num_output_groups: int,
     damping_ratio: float,
+    fisher_mode: str = "fast",
 ) -> dict:
     return {
         "stats_method": "fast_weight_gradient_fisher_v2",
@@ -81,7 +82,8 @@ def build_fast_stats_config(
         "stats_layer_chunk_size": int(stats_layer_chunk_size),
         "num_output_groups": int(num_output_groups),
         "damping_ratio": float(damping_ratio),
-        "stats_schema_version": 2,
+        "fisher_mode": str(fisher_mode),
+        "stats_schema_version": 3,
     }
 
 
@@ -113,10 +115,12 @@ def build_fisher_cache_config(
     stats_layer_chunk_size: int,
     num_output_groups: int,
     damping_ratio: float,
+    fisher_mode: str = "fast",
 ) -> dict:
     return {
         "component": "fisher",
-        "fisher_schema_version": 2,
+        "fisher_schema_version": 3,
+        "fisher_mode": str(fisher_mode),
         "rank": int(rank),
         "oversampling": int(oversampling),
         "n_calib": int(n_calib),
@@ -528,6 +532,7 @@ def collect_endloss_dlr_stats_fast(
     damping_ratio: float,
     overwrite: bool,
     overwrite_gradient_cache: bool = False,
+    fisher_mode: str = "fast",
 ) -> None:
     output_path = Path(output_folder)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -545,6 +550,7 @@ def collect_endloss_dlr_stats_fast(
         stats_layer_chunk_size=stats_layer_chunk_size,
         num_output_groups=num_output_groups,
         damping_ratio=damping_ratio,
+        fisher_mode=fisher_mode,
     )
     gradient_config = build_gradient_cache_config(
         n_calib=n_calib,
@@ -563,6 +569,7 @@ def collect_endloss_dlr_stats_fast(
         stats_layer_chunk_size=stats_layer_chunk_size,
         num_output_groups=num_output_groups,
         damping_ratio=damping_ratio,
+        fisher_mode=fisher_mode,
     )
 
     num_layers = analyzer.num_layers
@@ -634,24 +641,38 @@ def collect_endloss_dlr_stats_fast(
         logging.info("Reusing cached EndLoss_DLR Fisher curvature from %s", fisher_cache_path)
         fisher_curvature = _load_layer_cache(fisher_cache_path, num_layers)
     else:
-        logging.info(
-            "Collecting fast EndLoss_DLR Fisher | fisher_probes=%d layer_chunk=%d output_groups=%d",
-            min(fisher_probes, calib_tokens.shape[0]),
-            stats_layer_chunk_size,
-            num_output_groups,
-        )
-        fisher_config = SimpleNamespace(
-            device=device,
-            fisher_probes=fisher_probes,
-            rank=rank,
-            oversample=oversampling,
-            num_output_groups=num_output_groups,
-            damping_ratio=damping_ratio,
-            eps=1e-12,
-            calibration_batch_size=batch_size,
-            stats_layer_chunk_size=stats_layer_chunk_size,
-        )
-        fisher_curvature_map = collect_fisher_curvature(analyzer, calib_tokens, fisher_config)
+        if fisher_mode == "sqllm_diag":
+            logging.info(
+                "Collecting SQ-style EndLoss_DLR Fisher diagonal | examples=%d layer_chunk=%d",
+                calib_tokens.shape[0],
+                stats_layer_chunk_size,
+            )
+            fisher_curvature_map = collect_sqllm_style_fisher_diagonal(
+                analyzer=analyzer,
+                tokens=calib_tokens,
+                batch_size=batch_size,
+                device=device,
+                layer_chunk_size=stats_layer_chunk_size,
+            )
+        else:
+            logging.info(
+                "Collecting fast EndLoss_DLR Fisher | fisher_probes=%d layer_chunk=%d output_groups=%d",
+                min(fisher_probes, calib_tokens.shape[0]),
+                stats_layer_chunk_size,
+                num_output_groups,
+            )
+            fisher_config = SimpleNamespace(
+                device=device,
+                fisher_probes=fisher_probes,
+                rank=rank,
+                oversample=oversampling,
+                num_output_groups=num_output_groups,
+                damping_ratio=damping_ratio,
+                eps=1e-12,
+                calibration_batch_size=batch_size,
+                stats_layer_chunk_size=stats_layer_chunk_size,
+            )
+            fisher_curvature_map = collect_fisher_curvature(analyzer, calib_tokens, fisher_config)
         fisher_curvature = [fisher_curvature_map[layer_idx] for layer_idx in range(num_layers)]
         _save_layer_cache(fisher_cache_path, fisher_curvature, fisher_component_config)
 
@@ -662,7 +683,7 @@ def collect_endloss_dlr_stats_fast(
         layer_fisher = fisher_curvature[layer_idx]
         for module_name, grad in layer_gradients.items():
             curvature = layer_fisher[module_name]
-            layer_dict[module_name] = {
+            module_entry = {
                 "g": grad.cpu(),
                 "group_d": curvature["group_d"].cpu(),
                 "group_U": curvature["group_U"].cpu(),
@@ -672,6 +693,9 @@ def collect_endloss_dlr_stats_fast(
                 "gradient_examples": int(grad_tokens.shape[0]),
                 "fisher_probes": int(min(fisher_probes, calib_tokens.shape[0])),
             }
+            if "row_diag" in curvature:
+                module_entry["row_diag"] = curvature["row_diag"].cpu()
+            layer_dict[module_name] = module_entry
         combined_layers.append(layer_dict)
 
     _save_layer_cache(output_path, combined_layers, stats_config)
@@ -686,6 +710,7 @@ def quantize_module_from_scratch(
     layer_idx: int | None = None,
     module_name: str | None = None,
     sqllm_fisher: torch.Tensor | None = None,
+    pure_diagonal_fisher: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, EndLossDLRQuantStats]:
     device = W_fp.device
     W_fp = W_fp.float()
@@ -714,17 +739,37 @@ def quantize_module_from_scratch(
     alpha = module_stats["alpha"].to(device).float()
     alpha_min = float(module_stats["alpha_min"])
     alpha = alpha.clamp_min(alpha_min)
+    empty_U = torch.zeros(in_features, 0, device=device, dtype=torch.float32)
     if sqllm_fisher is not None:
-        empty_U = torch.zeros(in_features, 0, device=device, dtype=torch.float32)
         group_iter = [("sqllm", 0, out_features)]
+    elif pure_diagonal_fisher:
+        if "row_diag" not in module_stats:
+            raise RuntimeError(
+                "Missing row_diag for curvature-source=fisherdiag. Rebuild the Fisher cache with the updated fast Fisher collector."
+            )
+        row_diag = module_stats["row_diag"].to(device).float().clamp_min(config.d_min)
+        if row_diag.shape != W_fp.shape:
+            raise RuntimeError(
+                f"row_diag shape mismatch at layer={layer_idx}, module={module_name}: got {tuple(row_diag.shape)}, expected {tuple(W_fp.shape)}"
+            )
+        row_batch_size = 1
+        group_iter = [("row_diag", 0, out_features)]
     elif "group_d" in module_stats:
         group_d = module_stats["group_d"].to(device).float()
         group_U = module_stats["group_U"].to(device).float()
         row_ranges = _row_group_ranges(out_features, int(module_stats.get("num_output_groups", group_d.shape[0])))
         group_iter = [(group_idx, start, end) for group_idx, (start, end) in enumerate(row_ranges)]
     else:
-        d_A = module_stats["d_A"].to(device).float()
-        U_A = module_stats["U_A"].to(device).float()
+        if pure_diagonal_fisher:
+            if "diag_A" not in module_stats:
+                raise RuntimeError(
+                    "Missing diag_A for curvature-source=fisherdiag. Rebuild stats with the updated collector."
+                )
+            d_A = module_stats["diag_A"].to(device).float()
+            U_A = empty_U
+        else:
+            d_A = module_stats["d_A"].to(device).float()
+            U_A = module_stats["U_A"].to(device).float()
         group_iter = [(None, 0, out_features)]
 
     for group_idx, group_start, group_end in group_iter:
@@ -732,6 +777,9 @@ def quantize_module_from_scratch(
             end = min(start + row_batch_size, group_end)
             if group_idx == "sqllm":
                 d_cur = sqllm_fisher[start]
+                U_cur = empty_U
+            elif group_idx == "row_diag":
+                d_cur = row_diag[start]
                 U_cur = empty_U
             elif group_idx is None:
                 d_cur = d_A
@@ -805,6 +853,7 @@ def quantize_endloss_dlr_cache(
     layer_range: tuple[int, int] | None = None,
     row_batch_size: int = 64,
     sqllm_gradients=None,
+    pure_diagonal_fisher: bool = False,
 ) -> EndLossDLRQuantStats:
     output_path = Path(output_folder)
     if overwrite and output_path.exists() and layer_range is None:
@@ -842,6 +891,7 @@ def quantize_endloss_dlr_cache(
                 sqllm_fisher=None if layer_sqllm_gradients is None else _resolve_layer_mapping_entry(
                     layer_sqllm_gradients, layer_idx, module_name, "SqueezeLLM Fisher"
                 ),
+                pure_diagonal_fisher=pure_diagonal_fisher,
             )
             totals.add(module_totals)
             out_weights[module_name] = labels.numpy()
@@ -890,7 +940,7 @@ def parse_args():
     parser.add_argument("--stats-d-min-scale", type=float, default=1e-6)
     parser.add_argument("--solver-d-min", type=float, default=1e-8)
     parser.add_argument("--tie-tol", type=float, default=0.0)
-    parser.add_argument("--curvature-source", choices=["fast", "sqllm"], default="fast")
+    parser.add_argument("--curvature-source", choices=["fast", "fisherdiag", "sqllm"], default="fast")
     parser.add_argument("--squeeze-gradient-path", default="")
     parser.add_argument("--layer-range", type=int, nargs=2, metavar=("START", "END"), default=None)
     parser.add_argument("--cpu-count", type=int, default=None)
@@ -997,6 +1047,7 @@ def main():
         damping_ratio=args.damping_ratio,
         overwrite=args.overwrite_stats,
         overwrite_gradient_cache=args.overwrite_gradient_cache,
+        fisher_mode="sqllm_diag" if args.curvature_source == "fisherdiag" else "fast",
     )
     if args.stage == "stats":
         return
@@ -1009,7 +1060,7 @@ def main():
         lambda_safety=args.lambda_safety,
         d_min=args.solver_d_min,
         tie_tol=args.tie_tol,
-        init_uses_curvature=args.curvature_source == "sqllm",
+        init_uses_curvature=args.curvature_source in {"fast", "fisherdiag", "sqllm"},
     )
     if args.max_outer_iters == 0:
         logging.info("EndLoss_DLR mode: initialization-only (max_outer_iters=0)")
@@ -1032,6 +1083,7 @@ def main():
         layer_range=tuple(args.layer_range) if args.layer_range else None,
         row_batch_size=args.row_batch_size,
         sqllm_gradients=sqllm_gradients,
+        pure_diagonal_fisher=args.curvature_source == "fisherdiag",
     )
     if args.max_outer_iters == 0:
         logging.info("Initial DLR objective | rows=%d objective_sum=%.6e", totals.rows_quantized, totals.objective_sum)

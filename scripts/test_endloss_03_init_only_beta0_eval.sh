@@ -29,19 +29,19 @@ fi
 # Ignore any inherited OVERWRITE_GRADIENT_CACHE=1 from the shell.
 OVERWRITE_GRADIENT_CACHE=0
 GRADIENT_CACHE_ARGS=()
-CURVATURE_SOURCE="${CURVATURE_SOURCE:-fast}"
+CURVATURE_SOURCE="${CURVATURE_SOURCE:-fisherdiag}"
 SQUEEZE_GRADIENT_PATH="${SQUEEZE_GRADIENT_PATH:-cache/gradients/${DATA_TAG}.pt}"
 CURVATURE_ARGS=(--curvature-source "${CURVATURE_SOURCE}")
 if [[ "${CURVATURE_SOURCE}" == "sqllm" ]]; then
   CURVATURE_ARGS+=(--squeeze-gradient-path "${SQUEEZE_GRADIENT_PATH}")
   if [[ ! -f "${SQUEEZE_GRADIENT_PATH}" ]]; then
     echo "Missing SqueezeLLM gradient cache: ${SQUEEZE_GRADIENT_PATH}" >&2
-    echo "Set CURVATURE_SOURCE=fast to reuse the existing EndLoss_DLR gradient/Fisher cache." >&2
+    echo "Set CURVATURE_SOURCE=fisherdiag to use DLR SQ-style Fisher diagonal." >&2
     exit 1
   fi
   echo "Reusing SqueezeLLM gradient cache as Fisher: ${SQUEEZE_GRADIENT_PATH}"
 else
-  echo "Reusing EndLoss_DLR stats cache: ${BASE_STATS_PATH}"
+  echo "Using DLR SQ-style Fisher diagonal cache path: ${BASE_STATS_PATH}"
 fi
 STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
 SOLVER_TAG="${STATS_TAG}_curv${CURVATURE_SOURCE}_beta0_iters0_rtol1em07_lambda1p01_sdmin1em08"
