@@ -30,8 +30,29 @@ GRADIENT_CACHE_ARGS=()
 if [[ "${OVERWRITE_GRADIENT_CACHE}" == "1" ]]; then
   GRADIENT_CACHE_ARGS=(--overwrite-gradient-cache)
 fi
+CURVATURE_SOURCE="${CURVATURE_SOURCE:-sqllm}"
+SQUEEZE_GRADIENT_PATH="${SQUEEZE_GRADIENT_PATH:-cache/gradients/${DATA_TAG}.pt}"
+CURVATURE_ARGS=(--curvature-source "${CURVATURE_SOURCE}")
+if [[ "${CURVATURE_SOURCE}" == "sqllm" ]]; then
+  CURVATURE_ARGS+=(--squeeze-gradient-path "${SQUEEZE_GRADIENT_PATH}")
+  if [[ ! -f "${SQUEEZE_GRADIENT_PATH}" ]]; then
+    echo "Missing SqueezeLLM gradient cache: ${SQUEEZE_GRADIENT_PATH}"
+    echo "Building it inside this script..."
+    python quantize.py "${MODEL}" \
+      --seed_precision 3 \
+      --parent_precision 3 \
+      --mode gradients \
+      --dataset redpajama \
+      --seq_len 4096 \
+      --num_examples 1024 \
+      --redpajama_source cache \
+      --cpu_count 8
+  else
+    echo "Reusing SqueezeLLM gradient cache: ${SQUEEZE_GRADIENT_PATH}"
+  fi
+fi
 STATS_TAG="fastwgf_v2_${DATA_TAG}_r4_os4_ncalib1024_bs1_fprobe16_gex1024_lchunk8_og8_damp0p0001_seed0"
-SOLVER_TAG="${STATS_TAG}_beta0_iters0_rtol1em07_lambda1p01_sdmin1em08"
+SOLVER_TAG="${STATS_TAG}_curv${CURVATURE_SOURCE}_beta0_iters0_rtol1em07_lambda1p01_sdmin1em08"
 RUN_TAG="${MODEL_BASENAME}-w3-endloss-dlr-${SOLVER_TAG}"
 QUANTIZED_PATH="cache/endloss_dlr_quantized/${RUN_TAG}"
 PACKED_PATH="cache/endloss_dlr_packed/anyprec-${RUN_TAG}"
@@ -61,6 +82,7 @@ python endloss_dlr_quantize.py "${MODEL}" \
   --device cuda \
   --cpu-count 8 \
   --stats-path "${BASE_STATS_PATH}" \
+  "${CURVATURE_ARGS[@]}" \
   "${GRADIENT_CACHE_ARGS[@]}" \
   --quantized-path "${QUANTIZED_PATH}" \
   --output-packed-path "${PACKED_PATH}" \

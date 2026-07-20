@@ -168,6 +168,18 @@ def _load_layer_cache(folder: Path, num_layers: int):
     return [torch.load(folder / f"l{i}.pt", map_location="cpu") for i in range(num_layers)]
 
 
+def _load_sqllm_gradient_cache(path: str, num_layers: int):
+    if not path:
+        return None
+    cache_path = Path(path)
+    if not cache_path.exists():
+        raise FileNotFoundError(f"Missing SqueezeLLM gradient cache: {cache_path}")
+    gradients = torch.load(cache_path, map_location="cpu")
+    if not isinstance(gradients, (list, tuple)) or len(gradients) < num_layers:
+        raise RuntimeError(f"Unexpected SqueezeLLM gradient cache format: {cache_path}")
+    return gradients
+
+
 def resolve_legacy_fast_stats_cache(
     args,
     analyzer,
@@ -673,6 +685,7 @@ def quantize_module_from_scratch(
     row_batch_size: int,
     layer_idx: int | None = None,
     module_name: str | None = None,
+    sqllm_fisher: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, EndLossDLRQuantStats]:
     device = W_fp.device
     W_fp = W_fp.float()
@@ -684,6 +697,14 @@ def quantize_module_from_scratch(
     lut_out = torch.empty(out_features, 1, K, dtype=torch.float16, device="cpu")
     stats = EndLossDLRQuantStats(rows_total=out_features)
     row_batch_size = max(1, int(row_batch_size))
+    if sqllm_fisher is not None:
+        sqllm_fisher = sqllm_fisher.to(device).float().clamp_min(config.d_min)
+        if sqllm_fisher.shape != W_fp.shape:
+            raise RuntimeError(
+                f"SqueezeLLM Fisher shape mismatch at layer={layer_idx}, module={module_name}: "
+                f"got {tuple(sqllm_fisher.shape)}, expected {tuple(W_fp.shape)}"
+            )
+        row_batch_size = 1
 
     if "alpha" not in module_stats:
         raise RuntimeError(
@@ -693,7 +714,10 @@ def quantize_module_from_scratch(
     alpha = module_stats["alpha"].to(device).float()
     alpha_min = float(module_stats["alpha_min"])
     alpha = alpha.clamp_min(alpha_min)
-    if "group_d" in module_stats:
+    if sqllm_fisher is not None:
+        empty_U = torch.zeros(in_features, 0, device=device, dtype=torch.float32)
+        group_iter = [("sqllm", 0, out_features)]
+    elif "group_d" in module_stats:
         group_d = module_stats["group_d"].to(device).float()
         group_U = module_stats["group_U"].to(device).float()
         row_ranges = _row_group_ranges(out_features, int(module_stats.get("num_output_groups", group_d.shape[0])))
@@ -706,7 +730,10 @@ def quantize_module_from_scratch(
     for group_idx, group_start, group_end in group_iter:
         for start in range(group_start, group_end, row_batch_size):
             end = min(start + row_batch_size, group_end)
-            if group_idx is None:
+            if group_idx == "sqllm":
+                d_cur = sqllm_fisher[start]
+                U_cur = empty_U
+            elif group_idx is None:
                 d_cur = d_A
                 U_cur = U_A
             else:
@@ -777,6 +804,7 @@ def quantize_endloss_dlr_cache(
     overwrite: bool,
     layer_range: tuple[int, int] | None = None,
     row_batch_size: int = 64,
+    sqllm_gradients=None,
 ) -> EndLossDLRQuantStats:
     output_path = Path(output_folder)
     if overwrite and output_path.exists() and layer_range is None:
@@ -797,6 +825,7 @@ def quantize_endloss_dlr_cache(
             continue
 
         layer_stats = torch.load(Path(stats_folder) / f"l{layer_idx}.pt", map_location="cpu")
+        layer_sqllm_gradients = sqllm_gradients[layer_idx] if sqllm_gradients is not None else None
         fp_weights = analyzer.get_layer_weights(layer_idx)
         out_weights = {}
         out_luts = {}
@@ -810,6 +839,9 @@ def quantize_endloss_dlr_cache(
                 row_batch_size=row_batch_size,
                 layer_idx=layer_idx,
                 module_name=module_name,
+                sqllm_fisher=None if layer_sqllm_gradients is None else _resolve_layer_mapping_entry(
+                    layer_sqllm_gradients, layer_idx, module_name, "SqueezeLLM Fisher"
+                ),
             )
             totals.add(module_totals)
             out_weights[module_name] = labels.numpy()
@@ -858,6 +890,8 @@ def parse_args():
     parser.add_argument("--stats-d-min-scale", type=float, default=1e-6)
     parser.add_argument("--solver-d-min", type=float, default=1e-8)
     parser.add_argument("--tie-tol", type=float, default=0.0)
+    parser.add_argument("--curvature-source", choices=["fast", "sqllm"], default="fast")
+    parser.add_argument("--squeeze-gradient-path", default="")
     parser.add_argument("--layer-range", type=int, nargs=2, metavar=("START", "END"), default=None)
     parser.add_argument("--cpu-count", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=0)
@@ -884,7 +918,8 @@ def main():
         f"_damp{_tag_value(args.damping_ratio)}_seed{args.random_state}"
     )
     solver_tag = (
-        f"{stats_tag}_beta{_tag_value(args.beta)}_iters{args.max_outer_iters}"
+        f"{stats_tag}_curv{args.curvature_source}"
+        f"_beta{_tag_value(args.beta)}_iters{args.max_outer_iters}"
         f"_rtol{_tag_value(args.rel_tol)}_lambda{_tag_value(args.lambda_safety)}"
         f"_sdmin{_tag_value(args.solver_d_min)}"
     )
@@ -974,11 +1009,18 @@ def main():
         lambda_safety=args.lambda_safety,
         d_min=args.solver_d_min,
         tie_tol=args.tie_tol,
+        init_uses_curvature=args.curvature_source == "sqllm",
     )
     if args.max_outer_iters == 0:
         logging.info("EndLoss_DLR mode: initialization-only (max_outer_iters=0)")
     else:
         logging.info("EndLoss_DLR mode: full MM solver (max_outer_iters=%d)", args.max_outer_iters)
+    squeeze_gradient_path = args.squeeze_gradient_path or f"{args.cache_dir}/gradients/{data_tag}.pt"
+    sqllm_gradients = None
+    if args.curvature_source == "sqllm":
+        logging.info("Using SqueezeLLM Fisher curvature from %s", squeeze_gradient_path)
+        sqllm_gradients = _load_sqllm_gradient_cache(squeeze_gradient_path, analyzer.num_layers)
+
     totals = quantize_endloss_dlr_cache(
         analyzer=analyzer,
         stats_folder=args.stats_path,
@@ -989,6 +1031,7 @@ def main():
         overwrite=args.overwrite_quantize,
         layer_range=tuple(args.layer_range) if args.layer_range else None,
         row_batch_size=args.row_batch_size,
+        sqllm_gradients=sqllm_gradients,
     )
     if args.max_outer_iters == 0:
         logging.info("Initial DLR objective | rows=%d objective_sum=%.6e", totals.rows_quantized, totals.objective_sum)
