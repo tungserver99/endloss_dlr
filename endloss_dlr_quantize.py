@@ -184,6 +184,50 @@ def _load_sqllm_gradient_cache(path: str, num_layers: int):
     return gradients
 
 
+def _abs_percentile_summary(tensor: torch.Tensor, max_points: int = 1_000_000) -> str:
+    values = tensor.detach().abs().reshape(-1)
+    values = values[torch.isfinite(values)]
+    if values.numel() == 0:
+        return "p50=nan p90=nan p99=nan p999=nan max=nan"
+    if values.numel() > max_points:
+        stride = max(1, (values.numel() + max_points - 1) // max_points)
+        values = values[::stride]
+    values = values.float()
+    qs = torch.tensor([0.5, 0.9, 0.99, 0.999], device=values.device)
+    quantiles = torch.quantile(values, qs)
+    max_value = values.max()
+    return (
+        f"p50={float(quantiles[0].item()):.3e} "
+        f"p90={float(quantiles[1].item()):.3e} "
+        f"p99={float(quantiles[2].item()):.3e} "
+        f"p999={float(quantiles[3].item()):.3e} "
+        f"max={float(max_value.item()):.3e}"
+    )
+
+
+def _log_fisherdiag_shift_stats(
+    W_fp: torch.Tensor,
+    g: torch.Tensor,
+    d: torch.Tensor,
+    beta: float,
+    layer_idx: int | None,
+    module_name: str | None,
+) -> None:
+    shift = beta * g / d.clamp_min(torch.finfo(d.dtype).tiny)
+    shift_ratio = shift.abs() / W_fp.abs().clamp_min(1e-12)
+    logging.warning(
+        "Fisherdiag Newton shift stats layer=%s module=%s beta=%.6g | |w| %s | |g| %s | d %s | |beta*g/d| %s | shift/|w| %s",
+        layer_idx,
+        module_name,
+        beta,
+        _abs_percentile_summary(W_fp),
+        _abs_percentile_summary(g),
+        _abs_percentile_summary(d),
+        _abs_percentile_summary(shift),
+        _abs_percentile_summary(shift_ratio),
+    )
+
+
 def resolve_legacy_fast_stats_cache(
     args,
     analyzer,
@@ -752,6 +796,8 @@ def quantize_module_from_scratch(
             raise RuntimeError(
                 f"row_diag shape mismatch at layer={layer_idx}, module={module_name}: got {tuple(row_diag.shape)}, expected {tuple(W_fp.shape)}"
             )
+        if abs(float(config.beta)) > 0.0:
+            _log_fisherdiag_shift_stats(W_fp, g, row_diag, float(config.beta), layer_idx, module_name)
         group_iter = [("row_diag", 0, out_features)]
     elif "group_d" in module_stats:
         group_d = module_stats["group_d"].to(device).float()
