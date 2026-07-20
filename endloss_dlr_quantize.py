@@ -752,7 +752,6 @@ def quantize_module_from_scratch(
             raise RuntimeError(
                 f"row_diag shape mismatch at layer={layer_idx}, module={module_name}: got {tuple(row_diag.shape)}, expected {tuple(W_fp.shape)}"
             )
-        row_batch_size = 1
         group_iter = [("row_diag", 0, out_features)]
     elif "group_d" in module_stats:
         group_d = module_stats["group_d"].to(device).float()
@@ -779,7 +778,7 @@ def quantize_module_from_scratch(
                 d_cur = sqllm_fisher[start]
                 U_cur = empty_U
             elif group_idx == "row_diag":
-                d_cur = row_diag[start]
+                d_cur = row_diag[start:end]
                 U_cur = empty_U
             elif group_idx is None:
                 d_cur = d_A

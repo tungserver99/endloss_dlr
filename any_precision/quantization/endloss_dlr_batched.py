@@ -47,8 +47,15 @@ def _batched_loss(
     codebook64 = codebook.double()
     q = torch.gather(codebook64, 1, labels.long())
     e = q - w64
-    h = e @ U64
-    curvature = (d64.unsqueeze(0) * e.square()).sum(dim=1) + h.square().sum(dim=1)
+    if d64.ndim == 1:
+        d_expand = d64.unsqueeze(0)
+    else:
+        d_expand = d64
+    if U64.shape[-1] == 0:
+        h_sq = e.new_zeros(e.shape[0])
+    else:
+        h_sq = (e @ U64).square().sum(dim=1)
+    curvature = (d_expand * e.square()).sum(dim=1) + h_sq
     return beta * (g64 * e).sum(dim=1) + 0.5 * alpha64 * curvature
 
 def _continuous_target_batched(
@@ -60,7 +67,7 @@ def _continuous_target_batched(
     beta: float,
 ) -> torch.Tensor:
     inv_d = 1.0 / d_A.clamp_min(torch.finfo(d_A.dtype).tiny)
-    y = g * inv_d.unsqueeze(0)
+    y = g * (inv_d.unsqueeze(0) if inv_d.ndim == 1 else inv_d)
     if U_A.shape[-1] == 0:
         Ainv_g = y
     else:
@@ -78,7 +85,11 @@ def _initialize_labels_batched(x: torch.Tensor, rho_base: torch.Tensor, K: int) 
         return torch.zeros(rows, n, device=x.device, dtype=torch.long)
     K = min(K, n)
     order = torch.argsort(x, dim=1)
-    rho_sorted = rho_base.unsqueeze(0).expand(rows, -1).gather(1, order)
+    if rho_base.ndim == 1:
+        rho = rho_base.unsqueeze(0).expand(rows, -1)
+    else:
+        rho = rho_base.expand_as(x)
+    rho_sorted = rho.gather(1, order)
     cumsum = torch.cumsum(rho_sorted, dim=1)
     total = cumsum[:, -1:].clamp_min(torch.finfo(cumsum.dtype).tiny)
     thresholds = total * torch.arange(1, K, device=x.device, dtype=x.dtype).unsqueeze(0) / K
@@ -325,8 +336,11 @@ def quantize_rows_dlr_batched(
         lambda_A = config.lambda_safety * torch.linalg.eigvalsh(gram)[-1].clamp_min(0.0)
 
     x = _continuous_target_batched(w, g, d_A, U_A, alpha, config.beta)
-    rho_base = d_A + U_A.square().sum(dim=-1)
-    init_weights = rho_base if (config.max_outer_iters > 0 or config.init_uses_curvature) else torch.ones_like(rho_base)
+    if U_A.shape[-1] == 0:
+        rho_base = d_A
+    else:
+        rho_base = d_A + U_A.square().sum(dim=-1)
+    init_weights = rho_base if (config.max_outer_iters > 0 or config.init_uses_curvature) else torch.ones_like(w)
     labels = _initialize_labels_batched(x, init_weights, K)
     codebook = _initial_codebook_batched(x, labels, K, weights=init_weights)
     if config.max_outer_iters == 0:
