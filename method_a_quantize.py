@@ -463,7 +463,8 @@ def parse_args():
     parser.add_argument("--n-calib", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--stats-chunk-size", type=int, default=1024)
-    parser.add_argument("--stats-layer-chunk-size", type=int, default=1)
+    parser.add_argument("--stats-layer-chunk-size", type=int, default=8)
+    parser.add_argument("--sqllm-layer-chunk-size", type=int, default=0)
     parser.add_argument("--sensitivity-layer-chunk-size", type=int, default=0)
     parser.add_argument("--num-output-groups", type=int, default=4)
     parser.add_argument(
@@ -516,6 +517,10 @@ def main():
         raise ValueError("--num-output-groups must be positive")
     if args.sketch_rank < 1:
         raise ValueError("--sketch-rank must be positive")
+    if args.stats_layer_chunk_size < 1:
+        raise ValueError("--stats-layer-chunk-size must be positive")
+    if args.sqllm_layer_chunk_size < 0:
+        raise ValueError("--sqllm-layer-chunk-size must be non-negative")
     if args.sketch_token_chunk_size < 1:
         raise ValueError("--sketch-token-chunk-size must be positive")
     if args.batch_size < 1 or args.row_batch_size < 1:
@@ -644,7 +649,7 @@ def main():
             output_folder=args.initialization_path,
             bits=args.bits,
             device=args.device,
-            layer_chunk_size=args.stats_layer_chunk_size,
+            layer_chunk_size=args.sqllm_layer_chunk_size or args.stats_layer_chunk_size,
             cpu_count=args.cpu_count,
             overwrite=args.overwrite_init,
         )

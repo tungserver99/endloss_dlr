@@ -18,7 +18,8 @@ SEQ_LEN="${SEQ_LEN:-4096}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-1024}"
 N_CALIB="${N_CALIB:-1024}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
-STATS_LAYER_CHUNK_SIZE="${STATS_LAYER_CHUNK_SIZE:-1}"
+STATS_LAYER_CHUNK_SIZE="${STATS_LAYER_CHUNK_SIZE:-8}"
+SQLLM_LAYER_CHUNK_SIZE="${SQLLM_LAYER_CHUNK_SIZE:-${STATS_LAYER_CHUNK_SIZE}}"
 ROW_BATCH_SIZE="${ROW_BATCH_SIZE:-64}"
 KL_PROBES="${KL_PROBES:-1}"
 CPU_COUNT="${CPU_COUNT:-8}"
@@ -43,6 +44,7 @@ mkdir -p results
 echo "[run_method_a_diag_lowrank] stage=${METHOD_A_STAGE}"
 echo "[run_method_a_diag_lowrank] Method A q0 SqueezeLLM chunked gradients: ${SQ_LLM_GRADIENTS_PATH}"
 echo "[run_method_a_diag_lowrank] Method A q0 SqueezeLLM cache:              ${SQ_LLM_Q0_PATH}"
+echo "[run_method_a_diag_lowrank] Method A q0 layer chunk size:             ${SQLLM_LAYER_CHUNK_SIZE}"
 echo "[run_method_a_diag_lowrank] Method A DLR stats:   ${METHOD_A_STATS_PATH}"
 echo "[run_method_a_diag_lowrank] Method A output:      ${QUANTIZED_PATH}"
 
@@ -59,6 +61,7 @@ python method_a_quantize.py "${MODEL}" \
   --n-calib "${N_CALIB}" \
   --batch-size "${BATCH_SIZE}" \
   --stats-layer-chunk-size "${STATS_LAYER_CHUNK_SIZE}" \
+  --sqllm-layer-chunk-size "${SQLLM_LAYER_CHUNK_SIZE}" \
   --num-output-groups "${NUM_OUTPUT_GROUPS}" \
   --kl-probes "${KL_PROBES}" \
   --row-batch-size "${ROW_BATCH_SIZE}" \
