@@ -39,6 +39,15 @@ from any_precision.quantization.method_a_gradient import (
     model_identity,
     tensor_fingerprint,
 )
+from any_precision.quantization.method_a_lowrank import (
+    lowrank_nll_surrogate,
+    lowrank_quadratic_rows,
+    quantize_rows_method_a_lowrank,
+)
+from any_precision.quantization.method_a_lowrank_curvature import (
+    collect_method_a_diag_lowrank_curvatures,
+    lowrank_curvature_path,
+)
 from any_precision.quantization.method_a_sqllm_init import (
     build_sqllm_initialization,
     collect_sqllm_importance,
@@ -167,6 +176,7 @@ def quantize_method_a_cache(
     num_output_groups: int,
     overwrite: bool,
     layer_range: tuple[int, int] | None = None,
+    curvature_backend: str = "dense",
 ) -> QuantizationTotals:
     gradient_config = torch.load(Path(gradient_folder) / "_config.pt", map_location="cpu")
     curvature_config = torch.load(Path(curvature_folder) / "_config.pt", map_location="cpu")
@@ -176,6 +186,7 @@ def quantize_method_a_cache(
     quant_config = {
         "schema": 1,
         "source": "method_a_quantized",
+        "curvature_backend": curvature_backend,
         "bits": int(bits),
         "num_output_groups": int(num_output_groups),
         "solver": asdict(config),
@@ -237,25 +248,81 @@ def quantize_method_a_cache(
             labels = torch.empty_like(labels0, device="cpu", dtype=torch.uint8)
             codebooks = torch.empty_like(codebooks0, device="cpu", dtype=torch.float16)
             ranges = row_group_ranges(weight.shape[0], num_output_groups)
-
-            for group_idx, (group_start, group_end) in enumerate(ranges):
-                curvature = torch.load(
-                    curvature_group_path(curvature_folder, layer_idx, module_name, group_idx),
+            lowrank_nll = lowrank_kl = None
+            if curvature_backend == "diag-lowrank":
+                lowrank_nll = torch.load(
+                    lowrank_curvature_path(
+                        curvature_folder, layer_idx, module_name, "nll"
+                    ),
                     map_location=device,
                 )
-                hessian_nll = curvature["H_nll"].float()
-                hessian_kl = curvature["H_kl"].float()
+                lowrank_kl = torch.load(
+                    lowrank_curvature_path(
+                        curvature_folder, layer_idx, module_name, "kl"
+                    ),
+                    map_location=device,
+                )
+                if (
+                    lowrank_nll["diagonal"].shape[0] != len(ranges)
+                    or lowrank_kl["diagonal"].shape[0] != len(ranges)
+                ):
+                    raise RuntimeError(
+                        f"Low-rank curvature group mismatch at layer={layer_idx}, "
+                        f"module={module_name}"
+                    )
+
+            for group_idx, (group_start, group_end) in enumerate(ranges):
+                if curvature_backend == "dense":
+                    curvature = torch.load(
+                        curvature_group_path(
+                            curvature_folder, layer_idx, module_name, group_idx
+                        ),
+                        map_location=device,
+                    )
+                    hessian_nll = curvature["H_nll"].float()
+                    hessian_kl = curvature["H_kl"].float()
+                    trace_h_nll = hessian_nll.diagonal().sum()
+                    trace_h_kl = hessian_kl.diagonal().sum()
+                elif curvature_backend == "diag-lowrank":
+                    d_nll = lowrank_nll["diagonal"][group_idx].float()
+                    d_kl = lowrank_kl["diagonal"][group_idx].float()
+                    rank_nll = int(lowrank_nll["effective_ranks"][group_idx])
+                    rank_kl = int(lowrank_kl["effective_ranks"][group_idx])
+                    u_nll = lowrank_nll["factor"][group_idx, :, :rank_nll].float()
+                    u_kl = lowrank_kl["factor"][group_idx, :, :rank_kl].float()
+                    r_nll = lowrank_nll["row_majorizer"][group_idx].float()
+                    r_kl = lowrank_kl["row_majorizer"][group_idx].float()
+                    trace_h_nll = d_nll.sum() + u_nll.square().sum()
+                    trace_h_kl = d_kl.sum() + u_kl.square().sum()
+                else:
+                    raise ValueError(f"Unknown curvature backend: {curvature_backend}")
+
                 for start in range(group_start, group_end, max(1, row_batch_size)):
                     end = min(start + max(1, row_batch_size), group_end)
-                    result = quantize_rows_method_a(
-                        weight=weight[start:end],
-                        gradient=gradient[start:end],
-                        hessian_nll=hessian_nll,
-                        hessian_kl=hessian_kl,
-                        initial_labels=labels0[start:end],
-                        initial_codebooks=codebooks0[start:end],
-                        config=config,
-                    )
+                    if curvature_backend == "dense":
+                        result = quantize_rows_method_a(
+                            weight=weight[start:end],
+                            gradient=gradient[start:end],
+                            hessian_nll=hessian_nll,
+                            hessian_kl=hessian_kl,
+                            initial_labels=labels0[start:end],
+                            initial_codebooks=codebooks0[start:end],
+                            config=config,
+                        )
+                    else:
+                        result = quantize_rows_method_a_lowrank(
+                            weight=weight[start:end],
+                            gradient=gradient[start:end],
+                            d_nll=d_nll,
+                            u_nll=u_nll,
+                            d_kl=d_kl,
+                            u_kl=u_kl,
+                            initial_labels=labels0[start:end],
+                            initial_codebooks=codebooks0[start:end],
+                            config=config,
+                            row_majorizer_nll=r_nll,
+                            row_majorizer_kl=r_kl,
+                        )
 
                     # The packed representation uses FP16 LUTs. Constraints and
                     # objective must therefore be checked after that exact cast.
@@ -264,29 +331,43 @@ def quantize_method_a_cache(
                     candidate_codebooks = candidate_codebooks_fp16.float()
                     candidate_q = gather_quantized(candidate_codebooks, candidate_labels)
                     candidate_error = candidate_q - weight[start:end]
-                    candidate_cost_kl = 0.5 * quadratic_rows(candidate_error, hessian_kl)
+                    if curvature_backend == "dense":
+                        candidate_cost_kl = 0.5 * quadratic_rows(
+                            candidate_error, hessian_kl
+                        )
+                        candidate_loss = nll_surrogate(
+                            weight[start:end], gradient[start:end], hessian_nll,
+                            candidate_codebooks, candidate_labels,
+                        )
+                    else:
+                        candidate_cost_kl = 0.5 * lowrank_quadratic_rows(
+                            candidate_error, d_kl, u_kl
+                        )
+                        candidate_loss = lowrank_nll_surrogate(
+                            weight[start:end], gradient[start:end], d_nll, u_nll,
+                            candidate_codebooks, candidate_labels,
+                        )
                     candidate_cost_w = 0.5 * candidate_error.square().sum(dim=1)
-                    candidate_loss = nll_surrogate(
-                        weight[start:end],
-                        gradient[start:end],
-                        hessian_nll,
-                        candidate_codebooks,
-                        candidate_labels,
-                    )
 
                     q0_labels = labels0[start:end]
                     q0_codebooks = codebooks0[start:end]
                     q0_q = gather_quantized(q0_codebooks, q0_labels)
                     q0_error = q0_q - weight[start:end]
-                    eps_kl = 0.5 * quadratic_rows(q0_error, hessian_kl)
+                    if curvature_backend == "dense":
+                        eps_kl = 0.5 * quadratic_rows(q0_error, hessian_kl)
+                        q0_loss = nll_surrogate(
+                            weight[start:end], gradient[start:end], hessian_nll,
+                            q0_codebooks, q0_labels,
+                        )
+                    else:
+                        eps_kl = 0.5 * lowrank_quadratic_rows(
+                            q0_error, d_kl, u_kl
+                        )
+                        q0_loss = lowrank_nll_surrogate(
+                            weight[start:end], gradient[start:end], d_nll, u_nll,
+                            q0_codebooks, q0_labels,
+                        )
                     eps_w = 0.5 * q0_error.square().sum(dim=1)
-                    q0_loss = nll_surrogate(
-                        weight[start:end],
-                        gradient[start:end],
-                        hessian_nll,
-                        q0_codebooks,
-                        q0_labels,
-                    )
                     kl_allowance = config.constraint_tol * eps_kl.abs().clamp_min(
                         config.numerical_eps
                     )
@@ -336,8 +417,8 @@ def quantize_method_a_cache(
                         end,
                         int(use_candidate.sum()),
                         rows_q0,
-                        float(hessian_nll.diagonal().sum()),
-                        float(hessian_kl.diagonal().sum()),
+                        float(trace_h_nll),
+                        float(trace_h_kl),
                         float(weight[start:end].abs().max()),
                         float(q0_q.abs().max()),
                         float(q0_error.abs().max()),
@@ -347,13 +428,18 @@ def quantize_method_a_cache(
                         float(selected_cost_kl.div(eps_kl.clamp_min(config.numerical_eps)).max()),
                         float(selected_cost_w.div(eps_w.clamp_min(config.numerical_eps)).max()),
                     )
-                del curvature, hessian_nll, hessian_kl
+                if curvature_backend == "dense":
+                    del curvature, hessian_nll, hessian_kl
+                else:
+                    del d_nll, u_nll, d_kl, u_kl, r_nll, r_kl
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
             output_labels[module_name] = labels[:, None, :].numpy().astype(np.uint8)
             output_luts[module_name] = codebooks[:, None, :].numpy().astype(np.float16)
             del weight, gradient, labels0, codebooks0, labels, codebooks
+            if lowrank_nll is not None:
+                del lowrank_nll, lowrank_kl
             gc.collect()
         torch.save(output_labels, output_weights_path)
         torch.save(output_luts, output_lut_path)
@@ -376,6 +462,14 @@ def parse_args():
     parser.add_argument("--stats-layer-chunk-size", type=int, default=1)
     parser.add_argument("--sensitivity-layer-chunk-size", type=int, default=0)
     parser.add_argument("--num-output-groups", type=int, default=4)
+    parser.add_argument(
+        "--curvature-backend",
+        choices=["dense", "diag-lowrank"],
+        default="dense",
+    )
+    parser.add_argument("--sketch-rank", type=int, default=64)
+    parser.add_argument("--sketch-seed", type=int, default=0)
+    parser.add_argument("--sketch-token-chunk-size", type=int, default=256)
     parser.add_argument("--kl-probes", type=int, default=1)
     parser.add_argument("--row-batch-size", type=int, default=64)
     parser.add_argument("--max-outer-iters", type=int, default=8)
@@ -414,6 +508,16 @@ def main():
     args = parse_args()
     if not 1 <= args.bits <= 8:
         raise ValueError("--bits must be in [1, 8] because packed labels are uint8")
+    if args.num_output_groups < 1:
+        raise ValueError("--num-output-groups must be positive")
+    if args.sketch_rank < 1:
+        raise ValueError("--sketch-rank must be positive")
+    if args.sketch_token_chunk_size < 1:
+        raise ValueError("--sketch-token-chunk-size must be positive")
+    if args.batch_size < 1 or args.row_batch_size < 1:
+        raise ValueError("--batch-size and --row-batch-size must be positive")
+    if args.kl_probes < 1:
+        raise ValueError("--kl-probes must be positive")
     model_name = args.model.rstrip("/").split("/")[-1]
     data_tag = (
         f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
@@ -428,7 +532,13 @@ def main():
         f"_cb{args.codebook_update_interval}"
         f"_eps{args.numerical_eps}_tie{args.tie_tol}"
     )
-    run_tag = f"{model_name}-w{args.bits}-method-a-{method_tag}_{solver_tag}"
+    curvature_tag = args.curvature_backend
+    if args.curvature_backend == "diag-lowrank":
+        curvature_tag += f"-r{args.sketch_rank}-s{args.sketch_seed}"
+    run_tag = (
+        f"{model_name}-w{args.bits}-method-a-{curvature_tag}-"
+        f"{method_tag}_{solver_tag}"
+    )
     args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{data_tag}.pt"
     args.stats_path = args.stats_path or f"{args.cache_dir}/method_a_stats/{method_tag}"
     args.initialization_path = (
@@ -479,22 +589,44 @@ def main():
     calib_tokens = tokens[:min(args.n_calib, tokens.shape[0])]
     gradient_tokens = calib_tokens
     stats_root = Path(args.stats_path)
+    curvature_folder = stats_root / "curvatures"
+    if args.curvature_backend == "diag-lowrank":
+        curvature_folder = stats_root / (
+            f"curvatures_diag_lowrank_r{args.sketch_rank}_s{args.sketch_seed}"
+        )
 
     if args.stage in ("all", "stats"):
         save_signed_gradients(
             analyzer, gradient_tokens, str(stats_root / "gradients"), args.batch_size,
             args.device, args.stats_layer_chunk_size, args.overwrite_stats,
         )
-        collect_method_a_sensitivities(
-            analyzer, calib_tokens, str(stats_root / "sensitivities"), args.batch_size,
-            args.device, args.num_output_groups, args.kl_probes,
-            args.sensitivity_layer_chunk_size, args.random_state, args.overwrite_stats,
-        )
-        accumulate_method_a_curvatures(
-            analyzer, calib_tokens, str(stats_root / "sensitivities"),
-            str(stats_root / "curvatures"), args.device, args.stats_chunk_size,
-            args.overwrite_stats,
-        )
+        if args.curvature_backend == "dense":
+            collect_method_a_sensitivities(
+                analyzer, calib_tokens, str(stats_root / "sensitivities"), args.batch_size,
+                args.device, args.num_output_groups, args.kl_probes,
+                args.sensitivity_layer_chunk_size, args.random_state, args.overwrite_stats,
+            )
+            accumulate_method_a_curvatures(
+                analyzer, calib_tokens, str(stats_root / "sensitivities"),
+                str(curvature_folder), args.device, args.stats_chunk_size,
+                args.overwrite_stats,
+            )
+        else:
+            collect_method_a_diag_lowrank_curvatures(
+                analyzer=analyzer,
+                tokens=calib_tokens,
+                output_folder=str(curvature_folder),
+                batch_size=args.batch_size,
+                device=args.device,
+                num_output_groups=args.num_output_groups,
+                rank=args.sketch_rank,
+                sketch_seed=args.sketch_seed,
+                token_chunk_size=args.sketch_token_chunk_size,
+                kl_probes=args.kl_probes,
+                random_state=args.random_state,
+                calibration_dataset=args.dataset,
+                overwrite=args.overwrite_stats,
+            )
         if args.stage == "stats":
             return
 
@@ -520,10 +652,11 @@ def main():
         codebook_update_interval=args.codebook_update_interval,
     )
     totals = quantize_method_a_cache(
-        analyzer, str(stats_root / "gradients"), str(stats_root / "curvatures"),
+        analyzer, str(stats_root / "gradients"), str(curvature_folder),
         args.initialization_path, args.quantized_path, args.bits, config, args.device,
         args.row_batch_size, args.num_output_groups, args.overwrite_quantize,
         tuple(args.layer_range) if args.layer_range else None,
+        args.curvature_backend,
     )
     logging.info(
         "Method A summary | rows=%d q0_rows=%d objective_sum=%.6e",
