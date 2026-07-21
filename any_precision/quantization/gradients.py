@@ -64,14 +64,11 @@ def get_gradients(
     model = model.bfloat16()
     model.eval()
 
-    # Qwen 3.5 uses a much more memory-hungry fallback path when the
-    # flash-linear-attention kernels are unavailable. Gradient checkpointing
-    # materially lowers activation memory during the calibration backward pass.
-    if architecture == "Qwen3_5ForCausalLM" and hasattr(model, "gradient_checkpointing_enable"):
-        logging.info("Enabling gradient checkpointing for Qwen 3.5 gradient extraction to reduce memory usage.")
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    if hasattr(model, "gradient_checkpointing_enable"):
+        logging.info("Enabling gradient checkpointing for SqueezeLLM gradient extraction to reduce activation memory.")
         model.gradient_checkpointing_enable()
-        if hasattr(model.config, "use_cache"):
-            model.config.use_cache = False
 
     if model.device.type != 'cuda' and torch.cuda.device_count() == 1:
         model.cuda()
@@ -165,7 +162,7 @@ def get_gradients(
     # ----------------------------------------------------------------
     for tokens in tqdm(input_tokens, desc="Calculating gradients"):
         tokens = tokens.to(model.device).unsqueeze(0)
-        outputs = model(input_ids=tokens, labels=tokens)
+        outputs = model(input_ids=tokens, labels=tokens, use_cache=False)
         loss = outputs.loss
         loss.backward()
 

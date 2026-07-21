@@ -28,8 +28,8 @@ METHOD_A_STAGE="${1:-${METHOD_A_STAGE:-all}}"
 TOKENS_PATH="${TOKENS_PATH:-./cache/tokens/${MODEL_BASENAME}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.pt}"
 
 RUN_NAME="${MODEL_BASENAME}-w${BITS}-method-a-diag-lowrank-r${SKETCH_RANK}-s${SKETCH_SEED}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
-SQ_LLM_GRADIENTS_PATH="./cache/gradients/${MODEL_BASENAME}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}.pt"
-SQ_LLM_Q0_PATH="./cache/quantized/${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
+SQ_LLM_GRADIENTS_PATH="./cache/method_a_sqllm_chunked_gradients/${MODEL_BASENAME}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
+SQ_LLM_Q0_PATH="./cache/method_a_sqllm_chunked_q0/${MODEL_BASENAME}-w${BITS}_orig${BITS}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}"
 METHOD_A_STATS_PATH="./cache/method_a_stats/${MODEL_BASENAME}-${DATASET}_s${NUM_EXAMPLES}_blk${SEQ_LEN}_seed${RANDOM_STATE}_n${N_CALIB}_g${NUM_OUTPUT_GROUPS}_klp${KL_PROBES}"
 QUANTIZED_PATH="./cache/method_a_quantized/${RUN_NAME}"
 PACKED_PATH="./cache/method_a_packed/anyprec-${RUN_NAME}"
@@ -41,8 +41,8 @@ EVAL_C4_SAMPLES=2000
 mkdir -p results
 
 echo "[run_method_a_diag_lowrank] stage=${METHOD_A_STAGE}"
-echo "[run_method_a_diag_lowrank] SqueezeLLM gradients: ${SQ_LLM_GRADIENTS_PATH}"
-echo "[run_method_a_diag_lowrank] SqueezeLLM q0:        ${SQ_LLM_Q0_PATH}"
+echo "[run_method_a_diag_lowrank] Method A q0 SqueezeLLM chunked gradients: ${SQ_LLM_GRADIENTS_PATH}"
+echo "[run_method_a_diag_lowrank] Method A q0 SqueezeLLM cache:              ${SQ_LLM_Q0_PATH}"
 echo "[run_method_a_diag_lowrank] Method A DLR stats:   ${METHOD_A_STATS_PATH}"
 echo "[run_method_a_diag_lowrank] Method A output:      ${QUANTIZED_PATH}"
 

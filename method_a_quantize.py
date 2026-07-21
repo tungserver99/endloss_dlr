@@ -48,7 +48,7 @@ from any_precision.quantization.method_a_lowrank_curvature import (
     collect_method_a_diag_lowrank_curvatures,
     lowrank_curvature_path,
 )
-from any_precision.quantization.method_a_sqllm_init import ensure_sqllm_initialization
+from any_precision.quantization.method_a_sqllm_chunked_init import ensure_chunked_sqllm_initialization
 from any_precision.quantization.pack import pack
 
 
@@ -544,12 +544,12 @@ def main():
         f"{method_tag}_{solver_tag}"
     )
     sqllm_data_tag = f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
-    sqllm_gradients_path = f"{args.cache_dir}/gradients/{sqllm_data_tag}.pt"
+    sqllm_gradients_path = f"{args.cache_dir}/method_a_sqllm_chunked_gradients/{sqllm_data_tag}"
     args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{sqllm_data_tag}.pt"
     args.stats_path = args.stats_path or f"{args.cache_dir}/method_a_stats/{method_tag}"
     args.initialization_path = (
         args.initialization_path
-        or f"{args.cache_dir}/quantized/{model_name}-w{args.bits}_orig{args.bits}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
+        or f"{args.cache_dir}/method_a_sqllm_chunked_q0/{model_name}-w{args.bits}_orig{args.bits}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
     )
     args.quantized_path = args.quantized_path or f"{args.cache_dir}/method_a_quantized/{run_tag}"
     args.output_packed_path = args.output_packed_path or f"{args.cache_dir}/method_a_packed/anyprec-{run_tag}"
@@ -637,12 +637,14 @@ def main():
             return
 
     if args.stage in ("all", "init"):
-        ensure_sqllm_initialization(
+        ensure_chunked_sqllm_initialization(
             analyzer=analyzer,
             tokens=tokens,
+            gradients_folder=sqllm_gradients_path,
             output_folder=args.initialization_path,
             bits=args.bits,
-            gradients_path=sqllm_gradients_path,
+            device=args.device,
+            layer_chunk_size=args.stats_layer_chunk_size,
             cpu_count=args.cpu_count,
             overwrite=args.overwrite_init,
         )
