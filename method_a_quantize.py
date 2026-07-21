@@ -374,6 +374,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--stats-chunk-size", type=int, default=1024)
     parser.add_argument("--stats-layer-chunk-size", type=int, default=1)
+    parser.add_argument("--sensitivity-layer-chunk-size", type=int, default=0)
     parser.add_argument("--num-output-groups", type=int, default=4)
     parser.add_argument("--kl-probes", type=int, default=1)
     parser.add_argument("--row-batch-size", type=int, default=64)
@@ -487,7 +488,7 @@ def main():
         collect_method_a_sensitivities(
             analyzer, calib_tokens, str(stats_root / "sensitivities"), args.batch_size,
             args.device, args.num_output_groups, args.kl_probes,
-            args.stats_layer_chunk_size, args.random_state, args.overwrite_stats,
+            args.sensitivity_layer_chunk_size, args.random_state, args.overwrite_stats,
         )
         accumulate_method_a_curvatures(
             analyzer, calib_tokens, str(stats_root / "sensitivities"),

@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+from any_precision.quantization.activations import SaliencyEngine
 from any_precision.quantization.method_a import (
     MethodAConfig,
     exact_codebook_update,
@@ -219,4 +220,22 @@ def test_sum_loss_curvature_matches_mean_loss_after_undoing_reduction():
         _group_sensitivity(mean_gradient * token_count, num_groups=3) / token_count
     )
     torch.testing.assert_close(sum_curvature, restored_mean_curvature)
+
+def test_guidedquant_engine_keeps_nll_and_kl_channels_separate():
+    x = torch.tensor([[[1.0, 2.0], [3.0, -1.0], [0.5, 4.0]]])
+    nll = torch.tensor([[[1.0, 2.0], [0.5, 1.5], [2.0, 0.25]]])
+    kl = torch.tensor([[[3.0, 0.75], [1.0, 2.5], [0.5, 1.25]]])
+    sensitivity = torch.cat((nll, kl), dim=-1)
+    engine = SaliencyEngine(
+        in_features=2,
+        saliency=sensitivity,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    engine.add_batch(x)
+
+    for channel in range(sensitivity.shape[-1]):
+        weights = sensitivity[0, :, channel]
+        expected = x[0].T @ (x[0] * weights[:, None])
+        torch.testing.assert_close(engine.XTX[..., channel], expected)
 

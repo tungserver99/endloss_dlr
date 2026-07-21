@@ -16,6 +16,7 @@ NUM_EXAMPLES=1024
 N_CALIB=1024
 BATCH_SIZE=1
 STATS_LAYER_CHUNK_SIZE=1
+SENSITIVITY_LAYER_CHUNK_SIZE=0
 STATS_CHUNK_SIZE=1024
 ROW_BATCH_SIZE=64
 KL_PROBES=1
@@ -41,6 +42,7 @@ python method_a_quantize.py "${MODEL}" \
   --n-calib "${N_CALIB}" \
   --batch-size "${BATCH_SIZE}" \
   --stats-layer-chunk-size "${STATS_LAYER_CHUNK_SIZE}" \
+  --sensitivity-layer-chunk-size "${SENSITIVITY_LAYER_CHUNK_SIZE}" \
   --stats-chunk-size "${STATS_CHUNK_SIZE}" \
   --num-output-groups "${NUM_OUTPUT_GROUPS}" \
   --kl-probes "${KL_PROBES}" \
