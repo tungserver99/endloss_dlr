@@ -48,10 +48,7 @@ from any_precision.quantization.method_a_lowrank_curvature import (
     collect_method_a_diag_lowrank_curvatures,
     lowrank_curvature_path,
 )
-from any_precision.quantization.method_a_sqllm_init import (
-    build_sqllm_initialization,
-    collect_sqllm_importance,
-)
+from any_precision.quantization.method_a_sqllm_init import ensure_sqllm_initialization
 from any_precision.quantization.pack import pack
 
 
@@ -180,9 +177,16 @@ def quantize_method_a_cache(
 ) -> QuantizationTotals:
     gradient_config = torch.load(Path(gradient_folder) / "_config.pt", map_location="cpu")
     curvature_config = torch.load(Path(curvature_folder) / "_config.pt", map_location="cpu")
-    initialization_config = torch.load(
-        Path(initialization_folder) / "_config.pt", map_location="cpu"
-    )
+    initialization_config_path = Path(initialization_folder) / "_config.pt"
+    if initialization_config_path.exists():
+        initialization_config = torch.load(initialization_config_path, map_location="cpu")
+    else:
+        initialization_config = {
+            "schema": 1,
+            "source": "original_sqllm_cache",
+            "bits": int(bits),
+            "path": str(Path(initialization_folder)),
+        }
     quant_config = {
         "schema": 1,
         "source": "method_a_quantized",
@@ -539,11 +543,13 @@ def main():
         f"{model_name}-w{args.bits}-method-a-{curvature_tag}-"
         f"{method_tag}_{solver_tag}"
     )
-    args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{data_tag}.pt"
+    sqllm_data_tag = f"{model_name}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
+    sqllm_gradients_path = f"{args.cache_dir}/gradients/{sqllm_data_tag}.pt"
+    args.tokens_path = args.tokens_path or f"{args.cache_dir}/tokens/{sqllm_data_tag}.pt"
     args.stats_path = args.stats_path or f"{args.cache_dir}/method_a_stats/{method_tag}"
     args.initialization_path = (
         args.initialization_path
-        or f"{args.cache_dir}/method_a_sqllm_init/{model_name}-w{args.bits}-{method_tag}"
+        or f"{args.cache_dir}/quantized/{model_name}-w{args.bits}_orig{args.bits}-{args.dataset}_s{args.num_examples}_blk{args.seq_len}"
     )
     args.quantized_path = args.quantized_path or f"{args.cache_dir}/method_a_quantized/{run_tag}"
     args.output_packed_path = args.output_packed_path or f"{args.cache_dir}/method_a_packed/anyprec-{run_tag}"
@@ -631,13 +637,14 @@ def main():
             return
 
     if args.stage in ("all", "init"):
-        collect_sqllm_importance(
-            analyzer, calib_tokens, str(stats_root / "sqllm_importance"),
-            args.device, args.stats_layer_chunk_size, args.overwrite_init,
-        )
-        build_sqllm_initialization(
-            analyzer, str(stats_root / "sqllm_importance"), args.initialization_path,
-            args.bits, args.cpu_count, args.overwrite_init,
+        ensure_sqllm_initialization(
+            analyzer=analyzer,
+            tokens=tokens,
+            output_folder=args.initialization_path,
+            bits=args.bits,
+            gradients_path=sqllm_gradients_path,
+            cpu_count=args.cpu_count,
+            overwrite=args.overwrite_init,
         )
         if args.stage == "init":
             return
@@ -680,7 +687,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
